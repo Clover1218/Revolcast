@@ -1,0 +1,46 @@
+# ============================================================
+# Revolcast 默认配置文件
+# 任何字段均可被环境变量覆盖，规则：REVOLCAST_<SECTION>_<KEY>
+# 例如：REVOLCAST_DATABASE_PGHOST=192.168.1.10
+# ============================================================
+
+app:
+  name: "Revolcast"
+  env: "development"   # development | production
+  host: "0.0.0.0"
+  port: "8080"
+
+# 日志：format=json 便于接入 ELK / Loki；output 支持 console / file / both
+log:
+  level: "info"        # debug | info | warn | error
+  format: "json"       # json | console
+  output: "both"    # console | file | both
+  filepath: "logs/revolcast.log"
+
+# PostgreSQL（pgx）
+database:
+  pghost: "localhost"
+  pgport: 5432
+  pguser: "revolcast"
+  pgpassword: "revolcast"
+  dbname: "revolcast"
+  sslmode: "disable"
+
+# MongoDB
+mongodb:
+  mongohost: "localhost"
+  mongoport: 27017
+  mongouser: "revolcast"
+  mongopassword: "revolcast"
+  dbname: "revolcast"
+
+# Redis
+redis:
+  redishost: "localhost"
+  redisport: 6379
+  redispassword: ""
+  db: 0
+
+ws:
+  addr: "localhost:8080"
+  token: "123"

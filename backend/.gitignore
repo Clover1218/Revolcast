@@ -1,0 +1,11 @@
+# 编译产物
+/server
+/bin/
+*.exe
+
+# 日志
+logs/
+*.log
+
+# 本地环境变量
+.env
