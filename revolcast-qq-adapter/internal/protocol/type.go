@@ -20,7 +20,7 @@ const (
 // ===== Backend → QQ Adapter =====
 const (
 	TypeCommandQQSendGroupMsg   = "command.qq.send_group_msg"
-	TypeCommandQQSendPrivateMsg = "command.qq.send_private_msg"
+	TypeCommandQQSendPrivateMsg = "command.qq.send_private_message" // 与 WebSocket 消息结构设计文档保持一致（注意后缀 message）
 	TypeCommandQQSetGroupBan    = "command.qq.set_group_ban"
 	TypeCommandQQDeleteMsg      = "command.qq.delete_msg"
 	TypeCommandQQGetGroupMember = "command.qq.get_group_member"
@@ -28,7 +28,8 @@ const (
 
 // ===== QQ Adapter → Backend（回执）=====
 const (
-	TypeResultQQ = "result.qq"
+	TypeResultQQ               = "result.qq"
+	TypeResultQQSendPrivateMsg = "result.qq.send_private_message"
 )
 
 // ===== MC Server → Backend =====

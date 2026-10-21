@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"revolcast-backend/internal/biz"
 	"revolcast-backend/internal/config"
 	"revolcast-backend/internal/pkg/logger"
 	"revolcast-backend/internal/queue"
@@ -37,9 +38,7 @@ func main() {
 	if err != nil {
 		panic("Redis 连接失败" + err.Error())
 	}
-	_ = MongoDB
-	_ = PostgreSQL
-	_ = Redis
+	_ = MongoDB // 当前 BIZ-001 未使用 MongoDB；保留连接以备后续业务
 	// 初始化日志
 	log, err := logger.New(&cfg.Log)
 	if err != nil {
@@ -57,19 +56,40 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 业务队列 + Handler。Hub 负责按 bot_id 把 Action 回传给对应 Adapter。
+	// 业务队列 + Handler。Hub 负责按 bot_id 把指令回传给对应 Adapter。
 	hub := transport.NewHub(baseLogger)
+	pgRepo := repository.NewQQBindRepo(PostgreSQL)
+	redisRepo := repository.NewRedisRepo(Redis)
+	bindSvc := biz.NewBindCodeService(pgRepo, redisRepo, biz.Config{
+		BindCodeTTL:     5 * time.Minute,
+		RateLimitWindow: 5 * time.Minute,
+		RateLimitMax:    3,
+	})
+
+	// HTTP 鉴权接口（BIZ-002 / BIZ-003）：复用同一份 DB/Redis/Logger。
+	userRepo := repository.NewUserRepo(PostgreSQL)
+	authSvc := biz.NewAuthService(userRepo, redisRepo, biz.AuthConfig{})
+	authHandler := transport.NewAuthHandler(authSvc, baseLogger)
 	pool := queue.NewPool(rootCtx, queue.Config{
 		Workers:        cfg.Queue.Workers,
 		QueueSize:      cfg.Queue.QueueSize,
 		EnqueueTimeout: time.Duration(cfg.Queue.EnqueueTimeout) * time.Millisecond,
 		TaskTimeout:    time.Duration(cfg.Queue.TaskTimeout) * time.Millisecond,
-	}, transport.NewBizHandler(hub, baseLogger), baseLogger)
+	}, transport.NewBizHandler(hub, baseLogger, bindSvc), baseLogger)
 	hub.SetPool(pool)
 	go hub.Run()
 
-	http.HandleFunc("/ws", transport.ServeWS(hub, &cfg.WS, baseLogger))
-	srv := &http.Server{Addr: cfg.WS.Addr}
+	// 同一 Server 同时承载 WS（/ws）与 HTTP API（/api/v1/*），复用监听与优雅关闭。
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", transport.ServeWS(hub, &cfg.WS, baseLogger))
+	mux.Handle("/api/v1/auth/check-name", transport.CORSMiddleware(http.HandlerFunc(authHandler.CheckName)))
+	mux.Handle("/api/v1/auth/register", transport.CORSMiddleware(http.HandlerFunc(authHandler.Register)))
+	srv := &http.Server{
+		Addr:         cfg.WS.Addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
 
 	// 优雅关闭信号：三段式 —— 停收新连接 → 断开已连 WS → 排空队列 → 关 DB。
 	shutdownDone := make(chan struct{})

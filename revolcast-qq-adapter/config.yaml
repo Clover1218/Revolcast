@@ -40,3 +40,9 @@ redis:
   redisport: 6379
   redispassword: ""
   db: 0
+
+# Backend WS 连接（与 Backend 的 ws 配置对应）
+ws:
+  addr: "localhost:8080"
+  token: "123"
+  bot_id: "revolcast-qq-bot"

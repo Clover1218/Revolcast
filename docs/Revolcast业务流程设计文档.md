@@ -6,6 +6,8 @@
 | 业务ID | 业务名称 | 触发方式 | 核心处理 |
 | --- | --- | --- | --- | --- |
 | BIZ-001 | 生成QQ绑定码 | QQ 私聊 `revolcast user bind` | 创建 QQ 绑定码并私聊发送给用户 |
+| BIZ-002 | 校验用户名可用性 | 网站 HTTP `POST /api/v1/auth/check-name` | 查询 `users` 判断用户名是否已存在（只读） |
+| BIZ-003 | 注册网站账号 | 网站 HTTP `POST /api/v1/auth/register` | 校验用户名可用性、bcrypt 哈希密码并写入 `users` |
 
 > 命令格式（`revolcast ...`）与上表优先级（P0/P1）均为草案示例，落地前需评审确认。
 
@@ -56,5 +58,83 @@
 - WS inbound：`event.qq.message.private`
 - WS outbound：`command.qq.send_private_message`
 - WS result：`result.qq.send_private_message`
+
+---
+
+### 2.2 BIZ-002：校验用户名可用性
+
+**触发端：** 网站/外部客户端（HTTP） · **执行端：** Go Backend · **交付端：** HTTP 响应
+
+**业务目标**
+
+在注册表单填写阶段，前置查询目标用户名是否已被占用，避免用户提交注册后才发现冲突。仅做只读查询，不创建任何数据。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **参数校验** — 校验 `username` 存在且符合格式/长度规则，否则返回 `400` |
+| 02 | **限流检查** — 命中 Redis `revolcast:ratelimit:auth:check_name:{ip}` 限流（每 IP 5 分钟最多 10 次）则返回 `429` |
+| 03 | **规范化** — 将 `username` 统一转为小写 |
+| 04 | **查重** — 以 `lower(username)` 查询 `users` 表（走 `ux_users_username_lower` 索引） |
+| 05 | **返回结果** — 存在返回 `data.exists=true`，否则 `false` |
+
+**异常情况**
+
+- `400`：缺少 `username` 或长度/格式不符合规范。
+- `429`：命中 `revolcast:ratelimit:auth:check_name:{ip}` 限流。
+- `500`：数据库查询失败等内部错误（不向客户端暴露明细）。
+
+**数据依赖**
+
+- 读：`users`（按 `lower(username)` 查询）
+- 缓存：Redis `revolcast:ratelimit:auth:check_name:{ip}`
+
+**协议依赖**
+
+- HTTP：`POST /api/v1/auth/check-name`
+- 接口契约详见《Revolcast HTTP 接口设计文档》§3
+
+---
+
+### 2.3 BIZ-003：注册网站账号
+
+**触发端：** 网站/外部客户端（HTTP） · **执行端：** Go Backend · **交付端：** HTTP 响应
+
+**业务目标**
+
+创建新的网站账号。服务端对密码使用 bcrypt（cost=12）哈希后入库，明文密码不落库、不记日志；用户名可用性由应用层预检 + 数据库唯一约束双重保证。
+
+> 用户名冲突判定不单靠入库时的 unique key：应用层预检用于返回友好的 `409` 提示，数据库 `ux_users_username_lower` 唯一约束用于在并发/竞态下作为权威兜底（呼应《数据库表设计文档》§7.1）。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **参数校验** — 校验 `username`、`password` 存在且符合格式/长度规则，否则返回 `400` |
+| 02 | **限流检查** — 命中 Redis `revolcast:ratelimit:auth:register:{ip}` 限流（每 IP 5 分钟最多 5 次）则返回 `429` |
+| 03 | **规范化** — 将 `username` 统一转为小写 |
+| 04 | **用户名预检** — 以 `lower(username)` 查询 `users`；若已存在返回 `409` |
+| 05 | **密码哈希** — 使用 bcrypt（cost=12）对明文密码计算哈希 |
+| 06 | **持久化** — 写入 `users`（`username` 小写、 `password_hash`、 `status=1`、 `created_at`/`updated_at=now()`） |
+| 07 | **唯一约束兜底** — 若因并发插入触发 `ux_users_username_lower` 唯一冲突，回滚并返回 `409`，不暴露原始数据库错误 |
+
+**异常情况**
+
+- `400`：缺少字段或 `username`/`password` 长度/格式不符合规范。
+- `409`：用户名已被占用（应用层预检命中，或数据库唯一约束兜底命中）。
+- `429`：命中 `revolcast:ratelimit:auth:register:{ip}` 限流。
+- `500`：数据库写入失败等内部错误。
+
+**数据依赖**
+
+- 写：`users`（INSERT）
+- 读：`users`（用户名预检）
+- 缓存：Redis `revolcast:ratelimit:auth:register:{ip}`
+
+**协议依赖**
+
+- HTTP：`POST /api/v1/auth/register`
+- 接口契约详见《Revolcast HTTP 接口设计文档》§4
 
 ---

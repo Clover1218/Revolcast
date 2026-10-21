@@ -22,8 +22,8 @@ type Config struct {
 
 // QueueConfig 业务队列（Worker Pool）参数。
 type QueueConfig struct {
-	Workers        int `mapstructure:"workers"`          // Worker 协程数
-	QueueSize      int `mapstructure:"queue_size"`       // 有界队列容量
+	Workers        int `mapstructure:"workers"`            // Worker 协程数
+	QueueSize      int `mapstructure:"queue_size"`         // 有界队列容量
 	EnqueueTimeout int `mapstructure:"enqueue_timeout_ms"` // 队列满时投递最长等待（毫秒）
 	TaskTimeout    int `mapstructure:"task_timeout_ms"`    // 单条任务处理上限（毫秒）
 }

@@ -68,7 +68,7 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 | --------------- | -------------- | --------------------------------------------- | ------------------------------------------------------ |
 | `id`            | `BIGINT`       | PK, identity                                  | 账号 ID                                                  |
 | `username`      | `VARCHAR(64)`  | NOT NULL                                      | 用户名；应用层统一规范化为小写后存储                                     |
-| `password_hash` | `VARCHAR(255)` | NOT NULL                                      | 密码哈希；推荐 Argon2id，若使用 bcrypt 则采用合适 cost（如 12 起并按部署环境压测） |
+| `password_hash` | `VARCHAR(255)` | NOT NULL                                      | 密码哈希；使用 bcrypt 则采用cost=12 |
 | `email`         | `VARCHAR(255)` | NULL                                          | 可选邮箱                                                   |
 | `status`        | `SMALLINT`     | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=禁用                                              |
 | `created_at`    | `TIMESTAMPTZ`  | NOT NULL DEFAULT `now()`                      | 创建时间                                                   |

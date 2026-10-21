@@ -12,9 +12,17 @@ import (
 type Config struct {
 	App      AppConfig      `mapstructure:"app"`
 	Log      LogConfig      `mapstructure:"log"`
+	WS       WSConfig       `mapstructure:"ws"`
 	Database DatabaseConfig `mapstructure:"database"`
 	MongoDB  MongoDBConfig  `mapstructure:"mongodb"`
 	Redis    RedisConfig    `mapstructure:"redis"`
+}
+
+// WSConfig 与 Backend 建立 WS 连接所需的鉴权与标识。
+type WSConfig struct {
+	Addr  string `mapstructure:"addr"`   // Backend WS 地址，e.g. "localhost:8080"
+	Token string `mapstructure:"token"`  // 与 Backend ws.token 一致的鉴权串
+	BotID string `mapstructure:"bot_id"` // 本 Adapter 的稳定逻辑 ID，用于指令回传路由
 }
 
 type AppConfig struct {
@@ -85,6 +93,9 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("redis.redisport", 6379)
 	v.SetDefault("redis.redispassword", "")
 	v.SetDefault("redis.db", 0)
+	v.SetDefault("ws.addr", "localhost:8080")
+	v.SetDefault("ws.token", "123")
+	v.SetDefault("ws.bot_id", "revolcast-qq-bot")
 
 	// 2. 从 config.yaml 读取
 	v.SetConfigName("config")
