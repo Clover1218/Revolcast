@@ -24,11 +24,11 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 
 ### 1.2 数据存储分工
 
-| 存储 | 负责内容 | 不负责内容 |
-|---|---|---|
-| PostgreSQL | 用户、QQ 绑定、绑定码、游戏服务器、群配置、游戏角色绑定、订阅配置 | 大规模聊天正文历史、瞬时在线状态 |
-| MongoDB | 游戏/网站消息历史、消息元数据、消息游标所需字段 | 用户/绑定关系的权威数据 |
-| Redis | 在线心跳缓存、短期状态、限流计数、短期幂等键/nonce（按需） | 唯一权威绑定关系、不可丢失的消息历史 |
+| 存储         | 负责内容                               | 不负责内容              |
+| ---------- | ---------------------------------- | ------------------ |
+| PostgreSQL | 用户、QQ 绑定、绑定码、游戏服务器、群配置、游戏角色绑定、订阅配置 | 大规模聊天正文历史、瞬时在线状态   |
+| MongoDB    | 游戏/网站消息历史、消息元数据、消息游标所需字段           | 用户/绑定关系的权威数据       |
+| Redis      | 在线心跳缓存、短期状态、限流计数、短期幂等键/nonce（按需）   | 唯一权威绑定关系、不可丢失的消息历史 |
 
 ---
 
@@ -47,16 +47,16 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 
 ### 2.2 表总览
 
-| 表 | 用途 |
-|---|---|
-| `users` | 网站账号 |
-| `qq_bindings` | 网站账号与 QQ 号的全局绑定历史 |
-| `qq_bind_codes` | QQ 绑定的一次性验证码 |
-| `game_servers` | Minecraft 服务器注册与 API 鉴权配置 |
-| `server_groups` | QQ 群与游戏服务器的配置关联 |
-| `game_bind_codes` | 网站账号申请、由游戏内命令完成验证的一次性绑定码 |
-| `server_game_bindings` | 网站账号在单个游戏服务器中的角色绑定与公开/隐身设置 |
-| `server_message_subscriptions` | 用户对服务器消息的 QQ 私聊订阅设置 |
+| 表                              | 用途                         |
+| ------------------------------ | -------------------------- |
+| `users`                        | 网站账号                       |
+| `qq_bindings`                  | 网站账号与 QQ 号的全局绑定历史          |
+| `qq_bind_codes`                | QQ 绑定的一次性验证码               |
+| `game_servers`                 | Minecraft 服务器注册与 API 鉴权配置  |
+| `server_groups`                | QQ 群与游戏服务器的配置关联            |
+| `game_bind_codes`              | 网站账号申请、由游戏内命令完成验证的一次性绑定码   |
+| `server_game_bindings`         | 网站账号在单个游戏服务器中的角色绑定与公开/隐身设置 |
+| `server_message_subscriptions` | 用户对服务器消息的 QQ 私聊订阅设置        |
 
 ---
 
@@ -64,96 +64,106 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 
 ### 3.1 `users` — 网站账号
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 账号 ID |
-| `username` | `VARCHAR(64)` | NOT NULL | 用户名；应用层统一规范化为小写后存储 |
-| `password_hash` | `VARCHAR(255)` | NOT NULL | 密码哈希；推荐 Argon2id，若使用 bcrypt 则采用合适 cost（如 12 起并按部署环境压测） |
-| `email` | `VARCHAR(255)` | NULL | 可选邮箱 |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=禁用 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 更新时间，由应用或触发器维护 |
+| 字段              | 类型             | 约束 / 默认值                                      | 说明                                                     |
+| --------------- | -------------- | --------------------------------------------- | ------------------------------------------------------ |
+| `id`            | `BIGINT`       | PK, identity                                  | 账号 ID                                                  |
+| `username`      | `VARCHAR(64)`  | NOT NULL                                      | 用户名；应用层统一规范化为小写后存储                                     |
+| `password_hash` | `VARCHAR(255)` | NOT NULL                                      | 密码哈希；推荐 Argon2id，若使用 bcrypt 则采用合适 cost（如 12 起并按部署环境压测） |
+| `email`         | `VARCHAR(255)` | NULL                                          | 可选邮箱                                                   |
+| `status`        | `SMALLINT`     | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=禁用                                              |
+| `created_at`    | `TIMESTAMPTZ`  | NOT NULL DEFAULT `now()`                      | 创建时间                                                   |
+| `updated_at`    | `TIMESTAMPTZ`  | NOT NULL DEFAULT `now()`                      | 更新时间，由应用或触发器维护                                         |
 
 **索引与约束**
+
 - `PRIMARY KEY (id)`
 - `UNIQUE (lower(username))`，使用唯一表达式索引，避免大小写用户名重复。
 - 可按需求增加 `UNIQUE (lower(email)) WHERE email IS NOT NULL`；只有当产品规定邮箱全局唯一时才启用。
 
 **规则**
+
 - 禁用账号不能登录或发起新的绑定流程；是否允许只读访问由应用策略决定。
 - 不在此表存 QQ 号或游戏名；这些身份属于独立绑定关系。
 
 ### 3.2 `qq_bindings` — QQ 全局绑定关系
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 记录 ID |
-| `user_id` | `BIGINT` | NOT NULL FK → `users.id` | 网站账号 |
-| `qq_uin` | `BIGINT` | NOT NULL | QQ UIN；按数字存储，不保留前导零 |
-| `bot_id` | `VARCHAR(64)` | NOT NULL | 完成绑定的稳定机器人/Adapter 逻辑 ID，不应使用易变化的连接 ID |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=有效，0=已解绑 |
-| `bound_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 绑定时间 |
-| `unbound_at` | `TIMESTAMPTZ` | NULL | 解绑时间 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 更新时间 |
+| 字段           | 类型            | 约束 / 默认值                                      | 说明                                     |
+| ------------ | ------------- | --------------------------------------------- | -------------------------------------- |
+| `id`         | `BIGINT`      | PK, identity                                  | 记录 ID                                  |
+| `user_id`    | `BIGINT`      | NOT NULL FK → `users.id`                      | 网站账号                                   |
+| `qq_uin`     | `BIGINT`      | NOT NULL                                      | QQ UIN；按数字存储，不保留前导零                    |
+| `bot_id`     | `VARCHAR(64)` | NOT NULL                                      | 完成绑定的稳定机器人/Adapter 逻辑 ID，不应使用易变化的连接 ID |
+| `status`     | `SMALLINT`    | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=有效，0=已解绑                             |
+| `bound_at`   | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                      | 绑定时间                                   |
+| `unbound_at` | `TIMESTAMPTZ` | NULL                                          | 解绑时间                                   |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                      | 创建时间                                   |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                      | 更新时间                                   |
 
 **索引与约束**
+
 - `FOREIGN KEY (user_id) REFERENCES users(id)`
 - `UNIQUE (qq_uin) WHERE status = 1`：同一 QQ 同时只能绑定一个账号。
 - `UNIQUE (user_id) WHERE status = 1`：一个账号同时只能绑定一个 QQ。
 - `INDEX (bot_id)`。
 
 **规则**
+
 - 解绑时更新当前行状态并设置 `unbound_at`，保留历史记录。
 - `bot_id` 是来源/审计信息，不参与 QQ 的唯一性约束。
 - 若不同部署环境中的 `bot_id` 不全局唯一，应将实例维度纳入该字段或另建 `bot_instances` 表。
 
 ### 3.3 `qq_bind_codes` — QQ 绑定码
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 记录 ID |
-| `code` | `VARCHAR(8)` | NOT NULL UNIQUE, CHECK 长度为 8 | 一次性绑定码 |
-| `bot_id` | `VARCHAR(64)` | NOT NULL | 发码的机器人/Adapter ID |
-| `qq_uin` | `BIGINT` | NOT NULL | 申请绑定的 QQ 号 |
-| `trace_id` | `VARCHAR(64)` | NULL | 跨组件追踪 ID |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 0, CHECK (`status IN (0,1,2,3)`) | 0=待使用，1=已使用，2=已过期，3=已取消 |
-| `expires_at` | `TIMESTAMPTZ` | NOT NULL | 到期时间，建议创建后 5 分钟 |
-| `used_by_user_id` | `BIGINT` | NULL FK → `users.id` | 成功兑换该码的账号 |
-| `used_at` | `TIMESTAMPTZ` | NULL | 兑换时间 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
+| 字段                | 类型            | 约束 / 默认值                                          | 说明                      |
+| ----------------- | ------------- | ------------------------------------------------- | ----------------------- |
+| `id`              | `BIGINT`      | PK, identity                                      | 记录 ID                   |
+| `code`            | `VARCHAR(8)`  | NOT NULL UNIQUE, CHECK 长度为 8                      | 一次性绑定码                  |
+| `bot_id`          | `VARCHAR(64)` | NOT NULL                                          | 发码的机器人/Adapter ID       |
+| `qq_uin`          | `BIGINT`      | NOT NULL                                          | 申请绑定的 QQ 号              |
+| `trace_id`        | `VARCHAR(64)` | NULL                                              | 跨组件追踪 ID                |
+| `status`          | `SMALLINT`    | NOT NULL DEFAULT 0, CHECK (`status IN (0,1,2,3)`) | 0=待使用，1=已使用，2=已过期，3=已取消 |
+| `expires_at`      | `TIMESTAMPTZ` | NOT NULL                                          | 到期时间，建议创建后 5 分钟         |
+| `used_by_user_id` | `BIGINT`      | NULL FK → `users.id`                              | 成功兑换该码的账号               |
+| `used_at`         | `TIMESTAMPTZ` | NULL                                              | 兑换时间                    |
+| `created_at`      | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                          | 创建时间                    |
 
 **索引与约束**
+
 - `UNIQUE (code)`。
+- `UNIQUE (qq_uin) WHERE status = 0`：同一 QQ 同时仅允许一条待使用绑定码，支撑生成阶段幂等取/建与并发安全；并发插入冲突时由业务回退到查询现有码。
 - `INDEX (bot_id, qq_uin, expires_at) WHERE status = 0`。
 - `CHECK (char_length(code) = 8)`；应用层限制字符集为 `A-Z0-9` 并排除 `0/O/1/I/L`。
 - `FOREIGN KEY (used_by_user_id) REFERENCES users(id)`。
 
 **消费规则**
+
 - 兑换时必须通过单条条件更新原子消费，例如：`UPDATE ... SET status = 1, used_by_user_id = $user_id, used_at = now() WHERE code = $code AND status = 0 AND expires_at > now() RETURNING ...`。
 - 若更新返回 0 行，则该码无效、过期或已被使用。
 - 绑定记录创建与绑定码消费必须在同一个事务内完成。
 - `expires_at` 是权威过期判断；后台任务更新 `status=2` 仅用于清理/展示，不可依赖定时任务保证安全。
+- 生成阶段应保证同一 `qq_uin` 同时最多一条待使用码（见上方部分唯一索引 `UNIQUE (qq_uin) WHERE status = 0`）。并发申请时若插入因唯一约束冲突失败，应回退为查询并返回现有待使用码，实现幂等取/建。
 
 ### 3.4 `game_servers` — 游戏服务器
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 服务器 ID |
-| `code` | `VARCHAR(64)` | NOT NULL UNIQUE | 服务器短标识，建议只允许小写字母、数字、连字符 |
-| `name` | `VARCHAR(128)` | NOT NULL | 展示名称 |
-| `description` | `TEXT` | NULL | 描述 |
-| `api_secret_hash` | `VARCHAR(255)` | NOT NULL | API Secret 的哈希值；原始 Secret 仅在创建/轮换时展示一次 |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=停用 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 更新时间 |
+| 字段                | 类型             | 约束 / 默认值                                      | 说明                                     |
+| ----------------- | -------------- | --------------------------------------------- | -------------------------------------- |
+| `id`              | `BIGINT`       | PK, identity                                  | 服务器 ID                                 |
+| `code`            | `VARCHAR(64)`  | NOT NULL UNIQUE                               | 服务器短标识，建议只允许小写字母、数字、连字符                |
+| `name`            | `VARCHAR(128)` | NOT NULL                                      | 展示名称                                   |
+| `description`     | `TEXT`         | NULL                                          | 描述                                     |
+| `api_secret_hash` | `VARCHAR(255)` | NOT NULL                                      | API Secret 的哈希值；原始 Secret 仅在创建/轮换时展示一次 |
+| `status`          | `SMALLINT`     | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=停用                              |
+| `created_at`      | `TIMESTAMPTZ`  | NOT NULL DEFAULT `now()`                      | 创建时间                                   |
+| `updated_at`      | `TIMESTAMPTZ`  | NOT NULL DEFAULT `now()`                      | 更新时间                                   |
 
 **索引与约束**
+
 - `PRIMARY KEY (id)`。
 - `UNIQUE (code)`。
 - `CHECK (code ~ '^[a-z0-9-]+$')`。
 
 **规则**
+
 - `code` 用于 API 路径、指令参数和配置，不应依赖可变的 `name`。
 - 若 Secret 仅用于校验，可保存安全哈希；若使用 HMAC 验签且必须用密钥计算签名，则需要可安全取回的密钥管理方案，不能直接用不可逆哈希替代 HMAC 密钥。
 - 生产环境建议使用请求时间戳 + nonce + HMAC 签名，防止伪造和重放；密钥支持轮换与吊销。
@@ -161,44 +171,47 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 
 ### 3.5 `server_groups` — QQ 群与服务器配置关联
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 记录 ID |
-| `server_id` | `BIGINT` | NOT NULL FK → `game_servers.id` | 目标游戏服务器 |
-| `bot_id` | `VARCHAR(64)` | NOT NULL | QQ 机器人/Adapter 逻辑 ID |
-| `group_id` | `BIGINT` | NOT NULL | QQ 群号 |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=停用 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
+| 字段           | 类型            | 约束 / 默认值                                      | 说明                   |
+| ------------ | ------------- | --------------------------------------------- | -------------------- |
+| `id`         | `BIGINT`      | PK, identity                                  | 记录 ID                |
+| `server_id`  | `BIGINT`      | NOT NULL FK → `game_servers.id`               | 目标游戏服务器              |
+| `bot_id`     | `VARCHAR(64)` | NOT NULL                                      | QQ 机器人/Adapter 逻辑 ID |
+| `group_id`   | `BIGINT`      | NOT NULL                                      | QQ 群号                |
+| `status`     | `SMALLINT`    | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=启用，0=停用            |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                      | 创建时间                 |
 
 **索引与约束**
+
 - `FOREIGN KEY (server_id) REFERENCES game_servers(id)`。
 - `UNIQUE (server_id, bot_id, group_id) WHERE status = 1`。
 - `INDEX (bot_id, group_id) WHERE status = 1`，供群消息/指令路由快速查找。
 - `INDEX (server_id)`。
 
 **规则**
+
 - 同一个 QQ 群可以关联多个游戏服务器；同一服务器也可以关联多个群。
 - 此表仅表示配置关联，不代表自动广播游戏聊天到 QQ 群。
 - 若将来彻底移除群内查询/指令或其他群上下文功能，且群号不再参与任何业务，再考虑删除此表。
 
 ### 3.6 `game_bind_codes` — 游戏角色绑定码
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 记录 ID |
-| `code` | `VARCHAR(8)` | NOT NULL UNIQUE, CHECK 长度为 8 | 一次性绑定码 |
-| `server_id` | `BIGINT` | NOT NULL FK → `game_servers.id` | 目标服务器 |
-| `user_id` | `BIGINT` | NOT NULL FK → `users.id` | 申请绑定的账号 |
-| `qq_uin` | `BIGINT` | NULL | 申请时 QQ UIN 快照，仅用于审计；不是权限依据 |
-| `trace_id` | `VARCHAR(64)` | NULL | 跨组件追踪 ID |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 0, CHECK (`status IN (0,1,2,3)`) | 0=待使用，1=已使用，2=已过期，3=已取消 |
-| `game_name` | `VARCHAR(64)` | NULL | 验证成功后回填的游戏名快照 |
-| `game_uuid` | `UUID` | NULL | 验证成功后回填的游戏内 UUID 快照；由目标 Minecraft 服务端验证后提供 |
-| `expires_at` | `TIMESTAMPTZ` | NOT NULL | 到期时间，建议创建后 10 分钟 |
-| `used_at` | `TIMESTAMPTZ` | NULL | 游戏内成功兑换时间 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
+| 字段           | 类型            | 约束 / 默认值                                          | 说明                                         |
+| ------------ | ------------- | ------------------------------------------------- | ------------------------------------------ |
+| `id`         | `BIGINT`      | PK, identity                                      | 记录 ID                                      |
+| `code`       | `VARCHAR(8)`  | NOT NULL UNIQUE, CHECK 长度为 8                      | 一次性绑定码                                     |
+| `server_id`  | `BIGINT`      | NOT NULL FK → `game_servers.id`                   | 目标服务器                                      |
+| `user_id`    | `BIGINT`      | NOT NULL FK → `users.id`                          | 申请绑定的账号                                    |
+| `qq_uin`     | `BIGINT`      | NULL                                              | 申请时 QQ UIN 快照，仅用于审计；不是权限依据                 |
+| `trace_id`   | `VARCHAR(64)` | NULL                                              | 跨组件追踪 ID                                   |
+| `status`     | `SMALLINT`    | NOT NULL DEFAULT 0, CHECK (`status IN (0,1,2,3)`) | 0=待使用，1=已使用，2=已过期，3=已取消                    |
+| `game_name`  | `VARCHAR(64)` | NULL                                              | 验证成功后回填的游戏名快照                              |
+| `game_uuid`  | `UUID`        | NULL                                              | 验证成功后回填的游戏内 UUID 快照；由目标 Minecraft 服务端验证后提供 |
+| `expires_at` | `TIMESTAMPTZ` | NOT NULL                                          | 到期时间，建议创建后 10 分钟                           |
+| `used_at`    | `TIMESTAMPTZ` | NULL                                              | 游戏内成功兑换时间                                  |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                          | 创建时间                                       |
 
 **索引与约束**
+
 - `UNIQUE (code)`。
 - `INDEX (server_id, user_id, expires_at) WHERE status = 0`。
 - `FOREIGN KEY (server_id) REFERENCES game_servers(id)`。
@@ -206,6 +219,7 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 - `CHECK (char_length(code) = 8)`；字符集约束由生成器保证。
 
 **规则**
+
 - 绑定码绑定到指定服务器和指定账号；不可跨服务器兑换。
 - 只有游戏服务器端实际验证到的游戏玩家名和 UUID 才可写入 `game_name`、`game_uuid`，不能信任网站客户端提交的名字或 UUID。
 - `qq_uin` 为审计快照，可为空；账号权限仍以 `user_id` 和 `qq_bindings` 的有效关系为准。
@@ -214,22 +228,23 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 
 ### 3.7 `server_game_bindings` — 服务器角色绑定与可见性
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 绑定记录 ID |
-| `server_id` | `BIGINT` | NOT NULL FK → `game_servers.id` | 游戏服务器 |
-| `user_id` | `BIGINT` | NOT NULL FK → `users.id` | 网站账号 |
-| `game_name` | `VARCHAR(64)` | NOT NULL | 经游戏内验证的角色名；用于展示，不作为主要身份凭据 |
-| `game_uuid` | `UUID` | NOT NULL | 经可信游戏服务端验证的角色 UUID；用于识别绑定角色 |
-| `bind_code_id` | `BIGINT` | NULL FK → `game_bind_codes.id` ON DELETE SET NULL | 来源绑定码 |
-| `visibility` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`visibility IN (0,1)`) | 1=公开，0=隐身；每个账号在每个服务器独立设置 |
-| `status` | `SMALLINT` | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`) | 1=有效，0=已解绑 |
-| `bound_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 绑定时间 |
-| `unbound_at` | `TIMESTAMPTZ` | NULL | 解绑时间 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 更新时间 |
+| 字段             | 类型            | 约束 / 默认值                                          | 说明                          |
+| -------------- | ------------- | ------------------------------------------------- | --------------------------- |
+| `id`           | `BIGINT`      | PK, identity                                      | 绑定记录 ID                     |
+| `server_id`    | `BIGINT`      | NOT NULL FK → `game_servers.id`                   | 游戏服务器                       |
+| `user_id`      | `BIGINT`      | NOT NULL FK → `users.id`                          | 网站账号                        |
+| `game_name`    | `VARCHAR(64)` | NOT NULL                                          | 经游戏内验证的角色名；用于展示，不作为主要身份凭据   |
+| `game_uuid`    | `UUID`        | NOT NULL                                          | 经可信游戏服务端验证的角色 UUID；用于识别绑定角色 |
+| `bind_code_id` | `BIGINT`      | NULL FK → `game_bind_codes.id` ON DELETE SET NULL | 来源绑定码                       |
+| `visibility`   | `SMALLINT`    | NOT NULL DEFAULT 1, CHECK (`visibility IN (0,1)`) | 1=公开，0=隐身；每个账号在每个服务器独立设置    |
+| `status`       | `SMALLINT`    | NOT NULL DEFAULT 1, CHECK (`status IN (0,1)`)     | 1=有效，0=已解绑                  |
+| `bound_at`     | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                          | 绑定时间                        |
+| `unbound_at`   | `TIMESTAMPTZ` | NULL                                              | 解绑时间                        |
+| `created_at`   | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                          | 创建时间                        |
+| `updated_at`   | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`                          | 更新时间                        |
 
 **索引与约束**
+
 - `FOREIGN KEY (server_id) REFERENCES game_servers(id)`。
 - `FOREIGN KEY (user_id) REFERENCES users(id)`。
 - `FOREIGN KEY (bind_code_id) REFERENCES game_bind_codes(id) ON DELETE SET NULL`。
@@ -242,6 +257,7 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 - 若服务器端允许同名或采用不同大小写规则，应根据实际游戏版本与服务端规则调整名字唯一约束；UUID 唯一约束仍应保留在对应身份域内。
 
 **可见性语义（MVP）**
+
 - `visibility=1`：该角色消息允许进入网站公开消息流，游客和登录用户均可见。
 - `visibility=0`：该角色消息不向网站公开访客展示。
 - 本设计采用“当前角色设置控制其全部历史消息的公开可见性”：切换为隐身后，该角色历史消息也不再出现在公开消息查询、搜索和推送中；重新公开后，历史消息可重新显示。数据库中的历史消息不因切换而删除。
@@ -249,23 +265,26 @@ Revolcast 以网站作为主要消息客户端，QQ 机器人主要承担 QQ 绑
 - 已发送到客户端的数据无法被远程收回；权限切换后，服务端应停止后续推送并在后续 API 查询中执行新规则。
 - 网站游客只能浏览公开消息，不能发送消息；已绑定角色的发言权限仍由后端认证与授权逻辑决定。
 
+
 ### 3.8 `server_message_subscriptions` — QQ 私聊消息订阅
 
-| 字段 | 类型 | 约束 / 默认值 | 说明 |
-|---|---|---|---|
-| `id` | `BIGINT` | PK, identity | 记录 ID |
-| `server_id` | `BIGINT` | NOT NULL FK → `game_servers.id` | 被订阅的服务器 |
-| `user_id` | `BIGINT` | NOT NULL FK → `users.id` | 订阅者账号 |
-| `qq_enabled` | `BOOLEAN` | NOT NULL DEFAULT TRUE | 是否启用 QQ 私聊转播 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 创建时间 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | 更新时间 |
+| 字段           | 类型            | 约束 / 默认值                        | 说明           |
+| ------------ | ------------- | ------------------------------- | ------------ |
+| `id`         | `BIGINT`      | PK, identity                    | 记录 ID        |
+| `server_id`  | `BIGINT`      | NOT NULL FK → `game_servers.id` | 被订阅的服务器      |
+| `user_id`    | `BIGINT`      | NOT NULL FK → `users.id`        | 订阅者账号        |
+| `qq_enabled` | `BOOLEAN`     | NOT NULL DEFAULT TRUE           | 是否启用 QQ 私聊转播 |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`        | 创建时间         |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()`        | 更新时间         |
 
 **索引与约束**
+
 - `FOREIGN KEY (server_id) REFERENCES game_servers(id)`。
 - `FOREIGN KEY (user_id) REFERENCES users(id)`。
 - `UNIQUE (server_id, user_id)`。
 
 **规则**
+
 - 开启 QQ 私聊订阅要求用户有有效 QQ 绑定；启用时检查 `qq_bindings.status=1`。
 - 不在订阅表重复保存 `qq_uin`，发送时通过有效 QQ 绑定关系查询。
 - 订阅是用户主动选择的私聊通知，不是群广播。
@@ -281,31 +300,33 @@ PostgreSQL 负责权限和身份权威数据；MongoDB 存消息正文和历史�
 
 建议使用 MongoDB ObjectId 作为文档 `_id`，并额外保存单调递增或可排序的 `seq`/时间戳字段用于分页。若产品需要稳定的服务器内顺序号，可由后端为每个服务器分配序号；不要假定不同数据库之间的 ID 可直接比较。
 
-| 字段 | 类型 | 必需 | 说明 |
-|---|---|---:|---|
-| `_id` | `ObjectId` | 是 | 消息唯一 ID |
-| `server_id` | `int64` | 是 | 对应 PostgreSQL `game_servers.id` |
-| `seq` | `int64` | 建议 | 服务器内消息顺序号，用于稳定游标分页；由后端生成 |
-| `sender_type` | `string` | 是 | `player`、`system` 等 |
-| `sender_user_id` | `int64/null` | 否 | 玩家对应网站账号 ID；系统消息为空 |
-| `sender_game_name` | `string/null` | 否 | 发送时的游戏名快照，用于历史展示 |
-| `sender_game_uuid` | `string/null` | 建议 | 发送时的游戏角色 UUID 快照；建议保存为规范化 UUID 字符串，便于跨存储使用 |
-| `source_type` | `string` | 是 | `game` 或 `web` |
-| `content` | `string` | 是 | 消息正文，纯文本为主；服务端需限制长度 |
-| `content_format` | `string` | 建议 | MVP 使用 `plain`；后续可扩展 `markdown` |
-| `visibility_scope` | `string` | 是 | MVP 建议固定为 `server_public`；真正可见性仍需按当前 `server_game_bindings.visibility` 动态判定 |
-| `created_at` | `Date` | 是 | 服务端写入时间，UTC |
-| `edited_at` | `Date/null` | 否 | 编辑时间，若 MVP 不支持编辑可不使用 |
-| `deleted_at` | `Date/null` | 否 | 软删除时间，若 MVP 不支持删除可不使用 |
-| `metadata` | `object/null` | 否 | 来源消息 ID、客户端版本等非敏感扩展元数据 |
+| 字段                 | 类型            | 必需 | 说明                                                                          |
+| ------------------ | ------------- | -: | --------------------------------------------------------------------------- |
+| `_id`              | `ObjectId`    |  是 | 消息唯一 ID                                                                     |
+| `server_id`        | `int64`       |  是 | 对应 PostgreSQL `game_servers.id`                                             |
+| `seq`              | `int64`       | 建议 | 服务器内消息顺序号，用于稳定游标分页；由后端生成                                                    |
+| `sender_type`      | `string`      |  是 | `player`、`system` 等                                                         |
+| `sender_user_id`   | `int64/null`  |  否 | 玩家对应网站账号 ID；系统消息为空                                                          |
+| `sender_game_name` | `string/null` |  否 | 发送时的游戏名快照，用于历史展示                                                            |
+| `sender_game_uuid` | `string/null` | 建议 | 发送时的游戏角色 UUID 快照；建议保存为规范化 UUID 字符串，便于跨存储使用                                  |
+| `source_type`      | `string`      |  是 | `game` 或 `web`                                                              |
+| `content`          | `string`      |  是 | 消息正文，纯文本为主；服务端需限制长度                                                         |
+| `content_format`   | `string`      | 建议 | MVP 使用 `plain`；后续可扩展 `markdown`                                             |
+| `visibility_scope` | `string`      |  是 | MVP 建议固定为 `server_public`；真正可见性仍需按当前 `server_game_bindings.visibility` 动态判定 |
+| `created_at`       | `Date`        |  是 | 服务端写入时间，UTC                                                                 |
+| `edited_at`        | `Date/null`   |  否 | 编辑时间，若 MVP 不支持编辑可不使用                                                        |
+| `deleted_at`       | `Date/null`   |  否 | 软删除时间，若 MVP 不支持删除可不使用                                                       |
+| `metadata`         | `object/null` |  否 | 来源消息 ID、客户端版本等非敏感扩展元数据                                                      |
 
 **索引建议**
+
 - `{ server_id: 1, seq: -1 }`：主要历史查询和向前翻页。
 - `{ server_id: 1, created_at: -1 }`：按时间查询/排序的备用索引。
 - `{ sender_user_id: 1, created_at: -1 }`：用户消息历史或管理查询（确有需求时再建）。
 - 若 `seq` 不使用，则用 `{ server_id: 1, created_at: -1, _id: -1 }` 作为稳定复合排序与游标条件。
 
 **分页规则**
+
 - 首次拉取：按 `server_id` 查询，按 `seq DESC` 取最近 N 条，再反转结果供客户端按时间正序显示。
 - 加载更早历史：使用游标条件 `seq < before_seq`，而不是 `skip/offset`。
 - WebSocket 事件携带消息 `_id`、`seq`、`server_id`，前端用 ID 去重。
@@ -314,6 +335,7 @@ PostgreSQL 负责权限和身份权威数据；MongoDB 存消息正文和历史�
 ### 4.2 可见性执行
 
 查询消息时，后端应：
+
 1. 验证访问者是否登录；游客允许读取公开消息流。
 2. 对玩家消息根据 `sender_user_id + server_id` 查询有效 `server_game_bindings`。
 3. 仅当对应绑定有效且 `visibility=1` 时，将消息放入公开结果；系统消息按服务器公开策略处理。
@@ -325,6 +347,7 @@ PostgreSQL 负责权限和身份权威数据；MongoDB 存消息正文和历史�
 ### 4.3 附件与图片（后续阶段）
 
 图片二进制不直接存 PostgreSQL，也不建议把大文件塞进消息文档。图片上传到对象存储（S3 兼容服务等），MongoDB 消息文档中只存附件引用数组，例如：
+
 - `attachments[].object_key`
 - `attachments[].mime_type`
 - `attachments[].size_bytes`
@@ -340,14 +363,14 @@ PostgreSQL 负责权限和身份权威数据；MongoDB 存消息正文和历史�
 
 Redis 不作为账号、绑定或消息历史的权威存储。以下为建议键名，实际 TTL 和数据结构可按实现调整。
 
-| Key 模式 | 类型 | 用途 | 生命周期/说明 |
-|---|---|---|---|
-| `revolcast:server:{server_id}:heartbeat` | Hash / String | 最近心跳、在线人数、最大人数、MOTD、最后更新时间 | 设置 TTL；过期后显示 `stale/unknown`，不要直接等同离线 |
-| `revolcast:ratelimit:{scope}:{subject}` | String/Counter | 登录、发码、发消息、API 请求限流 | 短 TTL |
-| `revolcast:nonce:{server_id}:{nonce}` | String | API 签名防重放 | TTL 覆盖允许的时钟偏差窗口 |
-| `revolcast:bindcode:attempt:{subject}` | Counter | 绑定码尝试次数限制 | 短 TTL；真实绑定码仍以 PostgreSQL 为准 |
-| `revolcast:ws:presence:{user_id}` | String/Hash | WebSocket 在线状态（如需要） | TTL + 心跳续期 |
-| `revolcast:cache:server:{server_id}:summary` | Hash/JSON | 服务器展示信息缓存 | 可失效重建，不作为权威配置 |
+| Key 模式                                       | 类型             | 用途                         | 生命周期/说明                               |
+| -------------------------------------------- | -------------- | -------------------------- | ------------------------------------- |
+| `revolcast:server:{server_id}:heartbeat`     | Hash / String  | 最近心跳、在线人数、最大人数、MOTD、最后更新时间 | 设置 TTL；过期后显示 `stale/unknown`，不要直接等同离线 |
+| `revolcast:ratelimit:{scope}:{subject}`      | String/Counter | 登录、发码、发消息、API 请求限流         | 短 TTL                                 |
+| `revolcast:nonce:{server_id}:{nonce}`        | String         | API 签名防重放                  | TTL 覆盖允许的时钟偏差窗口                       |
+| `revolcast:bindcode:attempt:{subject}`       | Counter        | 绑定码尝试次数限制                  | 短 TTL；真实绑定码仍以 PostgreSQL 为准           |
+| `revolcast:ws:presence:{user_id}`            | String/Hash    | WebSocket 在线状态（如需要）        | TTL + 心跳续期                            |
+| `revolcast:cache:server:{server_id}:summary` | Hash/JSON      | 服务器展示信息缓存                  | 可失效重建，不作为权威配置                         |
 
 不要仅依赖 Redis TTL 实现绑定码一次性消费；PostgreSQL 的原子更新与事务才是权威。在线状态的过期表示“最近未收到心跳”，应展示为未知/过期状态，而非必然判定服务器进程已停止。
 
@@ -448,6 +471,8 @@ CREATE INDEX ix_qq_bindings_bot_id ON qq_bindings (bot_id);
 
 -- qq_bind_codes
 CREATE UNIQUE INDEX ux_qq_bind_codes_code ON qq_bind_codes (code);
+CREATE UNIQUE INDEX ux_qq_bind_codes_pending_qq
+    ON qq_bind_codes (qq_uin) WHERE status = 0;
 CREATE INDEX ix_qq_bind_codes_pending_lookup
     ON qq_bind_codes (bot_id, qq_uin, expires_at) WHERE status = 0;
 
@@ -482,3 +507,153 @@ CREATE UNIQUE INDEX ux_server_message_subscriptions_server_user
 ```
 
 > 注：上面的索引清单是结构示例；若已在 `CREATE TABLE` 中声明了 `UNIQUE`，不要重复创建同一唯一约束。实际迁移文件应只保留一份约束定义。
+
+---
+
+## 附录 B：完整建表语句（依据 v1.1）
+
+> **状态（2026-10-21 更新）：**
+> - **MongoDB（✅ 已执行）**：`revolcast` 库下的 `server_messages` 集合与 3 条索引（见附录 B.2）已通过 `revolcast-mongodb` MCP 实际创建。注意：该 MCP 连接串当前指向 `snxdugtwo:34354`（远程/容器实例）而非原始设计的 `localhost:27017`；若后端期望本地实例，需另行在本地重建。
+> - **PostgreSQL（✅ 已执行）**：8 张表 + 14 个命名索引已通过 `revolcast-postgres` MCP 实际创建于本地 `revolcast` 库（连接经 `SELECT current_database()` 校验为 `revolcast`）。其中 `server_message_subscriptions(server_id, user_id)` 以内联 `UNIQUE` 形式随表创建，未重复建索引。详见下方「建表执行记录」。
+> - **Redis**：仅键名规范，无建表概念，无需操作。
+>
+> **约束去重说明：** 文档附录 A 的索引清单与第 3 节字段表中的 `UNIQUE` 存在重叠。为避免重复创建同一唯一约束，下列 DDL 将“简单列级唯一”（`qq_bind_codes.code`、`game_servers.code`、`game_bind_codes.code`、`server_message_subscriptions(server_id, user_id)`）内联到 `CREATE TABLE`；将“部分唯一索引（`WHERE status=…`）”和“表达式索引（`lower()`）”单独以 `CREATE UNIQUE INDEX` 创建。
+
+### B.1 PostgreSQL
+
+```sql
+-- 执行顺序已考虑外键依赖：users / game_servers 先行，其余按引用关系排列。
+-- 执行记录（2026-10-21，经 revolcast-postgres MCP，库名 revolcast 已校验）：全部 CREATE TABLE / CREATE INDEX 成功。
+--   表：users, game_servers, qq_bindings, qq_bind_codes, server_groups, game_bind_codes, server_game_bindings, server_message_subscriptions（共 8）
+--   命名索引（14）：ux_users_username_lower; ux_qq_bindings_active_qq, ux_qq_bindings_active_user, ix_qq_bindings_bot_id;
+--     ux_qq_bind_codes_pending_qq, ix_qq_bind_codes_pending_lookup; ux_server_groups_active_route, ix_server_groups_active_group_route, ix_server_groups_server_id;
+--     ix_game_bind_codes_pending_user; ux_server_game_bindings_active_user, _active_uuid, _active_name, ix_server_game_bindings_active_server
+--   内联唯一约束（4）：game_servers.code, qq_bind_codes.code, game_bind_codes.code, server_message_subscriptions(server_id,user_id)
+
+CREATE TABLE users (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    username VARCHAR(64) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    email VARCHAR(255),
+    status SMALLINT NOT NULL DEFAULT 1 CHECK (status IN (0,1)),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_users_username_lower ON users (lower(username));
+-- 可选：仅当产品规定邮箱全局唯一时启用
+-- CREATE UNIQUE INDEX ux_users_email_lower ON users (lower(email)) WHERE email IS NOT NULL;
+
+CREATE TABLE qq_bindings (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    qq_uin BIGINT NOT NULL,
+    bot_id VARCHAR(64) NOT NULL,
+    status SMALLINT NOT NULL DEFAULT 1 CHECK (status IN (0,1)),
+    bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    unbound_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_qq_bindings_active_qq ON qq_bindings (qq_uin) WHERE status = 1;
+CREATE UNIQUE INDEX ux_qq_bindings_active_user ON qq_bindings (user_id) WHERE status = 1;
+CREATE INDEX ix_qq_bindings_bot_id ON qq_bindings (bot_id);
+
+CREATE TABLE qq_bind_codes (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    code VARCHAR(8) NOT NULL UNIQUE CHECK (char_length(code) = 8),
+    bot_id VARCHAR(64) NOT NULL,
+    qq_uin BIGINT NOT NULL,
+    trace_id VARCHAR(64),
+    status SMALLINT NOT NULL DEFAULT 0 CHECK (status IN (0,1,2,3)),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_by_user_id BIGINT REFERENCES users(id),
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_qq_bind_codes_pending_qq ON qq_bind_codes (qq_uin) WHERE status = 0;
+CREATE INDEX ix_qq_bind_codes_pending_lookup ON qq_bind_codes (bot_id, qq_uin, expires_at) WHERE status = 0;
+
+CREATE TABLE game_servers (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    code VARCHAR(64) NOT NULL UNIQUE CHECK (code ~ '^[a-z0-9-]+$'),
+    name VARCHAR(128) NOT NULL,
+    description TEXT,
+    api_secret_hash VARCHAR(255) NOT NULL,
+    status SMALLINT NOT NULL DEFAULT 1 CHECK (status IN (0,1)),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE server_groups (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    server_id BIGINT NOT NULL REFERENCES game_servers(id),
+    bot_id VARCHAR(64) NOT NULL,
+    group_id BIGINT NOT NULL,
+    status SMALLINT NOT NULL DEFAULT 1 CHECK (status IN (0,1)),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_server_groups_active_route ON server_groups (server_id, bot_id, group_id) WHERE status = 1;
+CREATE INDEX ix_server_groups_active_group_route ON server_groups (bot_id, group_id) WHERE status = 1;
+CREATE INDEX ix_server_groups_server_id ON server_groups (server_id);
+
+CREATE TABLE game_bind_codes (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    code VARCHAR(8) NOT NULL UNIQUE CHECK (char_length(code) = 8),
+    server_id BIGINT NOT NULL REFERENCES game_servers(id),
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    qq_uin BIGINT,
+    trace_id VARCHAR(64),
+    status SMALLINT NOT NULL DEFAULT 0 CHECK (status IN (0,1,2,3)),
+    game_name VARCHAR(64),
+    game_uuid UUID,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_game_bind_codes_pending_user ON game_bind_codes (server_id, user_id, expires_at) WHERE status = 0;
+
+CREATE TABLE server_game_bindings (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    server_id BIGINT NOT NULL REFERENCES game_servers(id),
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    game_name VARCHAR(64) NOT NULL,
+    game_uuid UUID NOT NULL,
+    bind_code_id BIGINT REFERENCES game_bind_codes(id) ON DELETE SET NULL,
+    visibility SMALLINT NOT NULL DEFAULT 1 CHECK (visibility IN (0,1)),
+    status SMALLINT NOT NULL DEFAULT 1 CHECK (status IN (0,1)),
+    bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    unbound_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ux_server_game_bindings_active_user ON server_game_bindings (server_id, user_id) WHERE status = 1;
+CREATE UNIQUE INDEX ux_server_game_bindings_active_uuid ON server_game_bindings (server_id, game_uuid) WHERE status = 1;
+CREATE UNIQUE INDEX ux_server_game_bindings_active_name ON server_game_bindings (server_id, lower(game_name)) WHERE status = 1;
+CREATE INDEX ix_server_game_bindings_active_server ON server_game_bindings (server_id) WHERE status = 1;
+
+CREATE TABLE server_message_subscriptions (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    server_id BIGINT NOT NULL REFERENCES game_servers(id),
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    qq_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (server_id, user_id)
+);
+```
+
+### B.2 MongoDB：`server_messages` 集合
+
+```js
+// 集合与索引（MongoDB 无显式建表；创建集合并建索引即可）
+db.createCollection("server_messages");
+db.server_messages.createIndexes([
+  { key: { server_id: 1, seq: -1 }, name: "ix_server_messages_server_seq" },
+  { key: { server_id: 1, created_at: -1 }, name: "ix_server_messages_server_created" },
+  { key: { sender_user_id: 1, created_at: -1 }, name: "ix_server_messages_sender_created", sparse: true }
+]);
+```
+
+### B.3 Redis
+
+Redis 仅定义键名规范（文档第 5 节），不存在“建表”概念，无需执行任何 DDL；上线后按文档键名约定写入即可。

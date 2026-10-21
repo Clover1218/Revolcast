@@ -462,4 +462,18 @@ const (
 
 同时，原有的 `command.qq.send_private_message` 应增加必填字段 `command_id`，由 Backend 生成并随指令下发，以保证出站指令与执行结果之间能够建立明确的关联关系。
 
+---
+
+## 4. 统一错误码约定（建议）
+
+`result.*` 消息的 `error_code` 使用下方统一错误码，由协议双方共享，不随具体业务自由命名。`error_message` 仅用于辅助排查，Backend 不得仅凭 `error_message` 判断分支。
+
+| error_code | 含义 | 典型触发 |
+| --- | --- | --- |
+| `QQ_ALREADY_BOUND` | 该 QQ 已存在有效绑定 | BIZ-001 生成绑定码时 qq_uin 已有 active `qq_bindings` |
+| `RATE_LIMITED` | 触发限流 | 命中 Redis 限流计数 |
+| `INTERNAL_ERROR` | 服务端内部错误（不含明细） | 绑定码碰撞重试耗尽、数据库写入失败等 |
+
+> 业务文档中的 `ErrQQAlreadyBound`、`ErrRateLimited` 等名称对应上表的 `error_code`。后续新增业务时应在此处补充，保持单一来源。
+
 

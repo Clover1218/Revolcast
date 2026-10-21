@@ -227,3 +227,9 @@ Minecraft 游戏服务器及未来的 Web 前端、AI 服务等入口，应通�
 - 用户明确确认的设计决策优先于 AI 自行提出的建议。
 
 **核心原则：以现有设计文档为依据，以 Go Backend 为业务核心，以统一协议隔离平台差异，以可验证的业务行为作为实现完成的标准。**
+
+## 10. 测试与运行
+
+- backend启动命令：`go run cmd/server/main.go`
+- revolcast-qq-adapter启动命令：`go run main.go`
+- NapCat在运行时保证开启

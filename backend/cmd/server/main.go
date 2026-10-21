@@ -10,6 +10,7 @@ import (
 	"revolcast-backend/internal/config"
 	"revolcast-backend/internal/pkg/logger"
 	"revolcast-backend/internal/queue"
+	"revolcast-backend/internal/repository"
 	"revolcast-backend/internal/transport"
 
 	"go.uber.org/zap"
@@ -22,6 +23,23 @@ func main() {
 		panic("加载配置失败: " + err.Error())
 	}
 
+	MongoDB, err := repository.NewMongoDB(&cfg.MongoDB)
+	if err != nil {
+		panic("MongoDB 连接失败" + err.Error())
+	}
+
+	PostgreSQL, err := repository.NewPostgresDB(&cfg.Database)
+	if err != nil {
+		panic("PostgreSQL 连接失败" + err.Error())
+	}
+
+	Redis, err := repository.NewRedisClient(&cfg.Redis)
+	if err != nil {
+		panic("Redis 连接失败" + err.Error())
+	}
+	_ = MongoDB
+	_ = PostgreSQL
+	_ = Redis
 	// 初始化日志
 	log, err := logger.New(&cfg.Log)
 	if err != nil {

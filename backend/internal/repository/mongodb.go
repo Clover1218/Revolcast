@@ -17,8 +17,8 @@ func NewMongoDB(cfg *config.MongoDBConfig) (*mongo.Database, error) {
 	defer cancel()
 
 	uri := fmt.Sprintf(
-		"mongodb://%s:%s@%s:%d",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port,
+		"mongodb://%s:%s@%s:%d/%s",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName,
 	)
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))

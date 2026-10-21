@@ -21,8 +21,8 @@ log:
 database:
   pghost: "localhost"
   pgport: 5432
-  pguser: "revolcast"
-  pgpassword: "revolcast"
+  pguser: "postgres"
+  pgpassword: "123456"
   dbname: "revolcast"
   sslmode: "disable"
 
