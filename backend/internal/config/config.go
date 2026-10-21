@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -16,6 +17,15 @@ type Config struct {
 	MongoDB  MongoDBConfig  `mapstructure:"mongodb"`
 	Redis    RedisConfig    `mapstructure:"redis"`
 	WS       WSConfig       `mapstructure:"ws"`
+	Queue    QueueConfig    `mapstructure:"queue"`
+}
+
+// QueueConfig 业务队列（Worker Pool）参数。
+type QueueConfig struct {
+	Workers        int `mapstructure:"workers"`          // Worker 协程数
+	QueueSize      int `mapstructure:"queue_size"`       // 有界队列容量
+	EnqueueTimeout int `mapstructure:"enqueue_timeout_ms"` // 队列满时投递最长等待（毫秒）
+	TaskTimeout    int `mapstructure:"task_timeout_ms"`    // 单条任务处理上限（毫秒）
 }
 
 type AppConfig struct {
@@ -93,6 +103,10 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("redis.db", 0)
 	v.SetDefault("ws.addr", ":8080")
 	v.SetDefault("ws.token", "123")
+	v.SetDefault("queue.workers", runtime.NumCPU())
+	v.SetDefault("queue.queue_size", 4096)
+	v.SetDefault("queue.enqueue_timeout_ms", 200)
+	v.SetDefault("queue.task_timeout_ms", 5000)
 
 	// 2. 从 config.yaml 读取
 	v.SetConfigName("config")

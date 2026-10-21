@@ -44,3 +44,10 @@ redis:
 ws:
   addr: "localhost:8080"
   token: "123"
+
+# 业务队列（Worker Pool）：生产者-消费者模型，readPump 投递、业务 Handler 消费
+queue:
+  workers: 16                 # Worker 协程数，建议 ≈ Mongo 连接池上限的 1/2
+  queue_size: 4096            # 有界队列容量，务必有界以防 OOM
+  enqueue_timeout_ms: 200     # 队列满时投递最长等待，超时即丢弃（背压）
+  task_timeout_ms: 5000       # 单条任务处理上限，防止一个卡死的 handler 占死 Worker
