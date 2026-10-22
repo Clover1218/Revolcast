@@ -473,7 +473,17 @@ const (
 | `QQ_ALREADY_BOUND` | 该 QQ 已存在有效绑定 | BIZ-001 生成绑定码时 qq_uin 已有 active `qq_bindings` |
 | `RATE_LIMITED` | 触发限流 | 命中 Redis 限流计数 |
 | `INTERNAL_ERROR` | 服务端内部错误（不含明细） | 绑定码碰撞重试耗尽、数据库写入失败等 |
+| `USER_ALREADY_BOUND` | 该账号已存在有效绑定 | BIZ-006 赎回绑定码时 user_id 已有 active `qq_bindings` |
+| `NOT_BOUND` | 当前无有效绑定 | BIZ-007 解绑时该账号无 active `qq_bindings` |
+| `BIND_CODE_INVALID` | 绑定码无效 | BIZ-006 绑定码不存在 / 已使用 / 已过期 |
+| `INVALID_PARAM` | 请求参数校验失败 | 绑定码长度不为 8 等 |
+| `INVALID_CREDENTIALS` | 凭证错误（用户名/密码，统一） | 登录用户名不存在或密码错误（防枚举） |
+| `ACCOUNT_DISABLED` | 账号被禁用（status != 1） | 登录 / 绑定被禁用账号 |
+| `NOT_AUTHENTICATED` | 未认证 / 会话失效 | 未携带有效会话 Cookie 或会话已撤销/过期 |
+| `USERNAME_TAKEN` | 用户名已被占用 | 注册时用户名唯一约束冲突 |
 
-> 业务文档中的 `ErrQQAlreadyBound`、`ErrRateLimited` 等名称对应上表的 `error_code`。后续新增业务时应在此处补充，保持单一来源。
+> **单一映射源（single source of truth）**：上表的 `error_code` 字符串由 `backend/internal/biz/errors.go` 的 `errorMeta[...].WSCode` 统一定义，并通过 `biz.ResolveErrorMeta(err).WSCode` 在 WS 出口（如 `transport/handler.go` 生成绑定码失败的回复）自动推导；`protocol/qq.go` 中 `ErrorCodeXxx` 常量是其在消息层面对应的引用，二者必须保持一致。后续新增业务时请先在 `biz/errors.go` 的 `errorMeta` 登记，再同步本表，避免漂移。
+>
+> **错误链约定**：biz 层返回业务错误时必须用 `biz.Wrap(sentinel, cause, "上下文")` 携带底层根因，**绝不允许裸返回哨兵吞掉原因**；根因不对外暴露，但会通过 `zap.Error` 完整输出到内部日志，便于排障。
 
 

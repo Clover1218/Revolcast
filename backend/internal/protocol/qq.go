@@ -91,6 +91,10 @@ const (
 	CommandStatusFailed  = "failed"
 
 	// 统一错误码（见 WebSocket 消息结构设计文档 §4，业务层不得仅凭 error_message 判断分支）。
+	//
+	// 注意：这些字符串必须与 internal/biz/errors.go 中 errorMeta 的 WSCode 保持一致，
+	// 后者是对外错误码与用户文案的唯一映射源（single source of truth）。
+	// 新增 / 修改 WebSocket 错误码时，请同步更新 biz/errors.go 的 errorMeta。
 	ErrorCodeQQAlreadyBound = "QQ_ALREADY_BOUND"
 	ErrorCodeRateLimited    = "RATE_LIMITED"
 	ErrorCodeInternal       = "INTERNAL_ERROR"

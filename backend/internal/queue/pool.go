@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"revolcast-backend/internal/biz"
 	"go.uber.org/zap"
 )
 
@@ -185,7 +186,11 @@ func (p *Pool) execute(parent context.Context, lg *zap.Logger, t Task) {
 
 	if err := p.handler(ctx, t); err != nil {
 		p.metrics.Failed.Add(1)
-		lg.Warn("task handle failed", zap.Error(err), zap.Duration("cost", time.Since(start)))
+		lg.Warn("task handle failed",
+			zap.String("error_code", biz.ResolveErrorMeta(err).WSCode),
+			zap.Error(err),
+			zap.Duration("cost", time.Since(start)),
+		)
 		return
 	}
 	lg.Debug("task handled", zap.Duration("cost", time.Since(start)))

@@ -14,6 +14,16 @@ import (
 // 由 repository 层定义，biz 层据 errors.Is 映射为业务错误。
 var ErrUsernameTaken = errors.New("username taken")
 
+// ErrUserNotFound 用户名不存在（登录等场景用于友好映射，不直接暴露账号是否存在）。
+var ErrUserNotFound = errors.New("user not found")
+
+// UserRecord 是 users 表中登录等业务所需的精简视图。
+type UserRecord struct {
+	ID           int64
+	PasswordHash string
+	Status       int16
+}
+
 // UserRepo 封装 users 表的访问。
 // 库表结构以 docs/Revolcast_数据库表设计文档_v1.1.md §3.1 为准。
 type UserRepo struct {
@@ -38,6 +48,37 @@ func (r *UserRepo) ExistsByUsername(ctx context.Context, username string) (bool,
 		return false, fmt.Errorf("查询用户名失败: %w", err)
 	}
 	return true, nil
+}
+
+// GetByID 按账号 ID 查用户（绑定等已认证场景用）。
+// 不存在返回 ErrUserNotFound；返回 status 供 biz 层做账号禁用校验。
+func (r *UserRepo) GetByID(ctx context.Context, id int64) (*UserRecord, error) {
+	const q = `SELECT id, password_hash, status FROM users WHERE id = $1 LIMIT 1`
+	var rec UserRecord
+	err := r.pool.QueryRow(ctx, q, id).Scan(&rec.ID, &rec.PasswordHash, &rec.Status)
+	if err == pgx.ErrNoRows {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	return &rec, nil
+}
+
+// GetByUsername 按用户名查用户（登录等业务用）。
+// 以 lower(username) = lower($1) 大小写不敏感匹配；不存在返回 ErrUserNotFound。
+// 返回 id、password_hash、status，供 biz 层做 bcrypt 比对与状态校验。
+func (r *UserRepo) GetByUsername(ctx context.Context, username string) (*UserRecord, error) {
+	const q = `SELECT id, password_hash, status FROM users WHERE lower(username) = lower($1) LIMIT 1`
+	var rec UserRecord
+	err := r.pool.QueryRow(ctx, q, username).Scan(&rec.ID, &rec.PasswordHash, &rec.Status)
+	if err == pgx.ErrNoRows {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询用户失败: %w", err)
+	}
+	return &rec, nil
 }
 
 // CreateUser 写入新账号（username 为调用方裁剪后的原始大小写值、password_hash、status=1）。

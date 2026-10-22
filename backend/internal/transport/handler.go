@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -97,15 +96,18 @@ func route(ctx context.Context, task queue.Task, svc *biz.BindCodeService, log *
 	// 所有私聊命令路径都向用户回一条私聊消息（成功或友好提示），
 	// 避免用户得到静默无响应。文案不泄露内部错误细节（日志最小化）。
 	var reply string
-	switch {
-	case berr == nil:
+	if berr == nil {
 		reply = fmt.Sprintf("你的 QQ 绑定码为：%s\n请在 Revolcast 网站个人中心的「QQ 绑定」页面输入，5 分钟内有效。", code)
-	case errors.Is(berr, biz.ErrRateLimited):
-		reply = "请求过于频繁，请 5 分钟后再试。"
-	case errors.Is(berr, biz.ErrQQAlreadyBound):
-		reply = "你的 QQ 已绑定其他账号，如需重新绑定请先解绑。"
-	default:
-		reply = "生成绑定码失败，请稍后再试。"
+	} else {
+		// 对外：由 biz 注册表统一映射（error_code + 用户友好文案），不泄露内部细节；
+		// 对内：完整错误链通过 zap.Error 输出到日志，error_code 便于聚合告警。
+		meta := biz.ResolveErrorMeta(berr)
+		log.Warn("生成绑定码失败",
+			zap.Int64("qq_uin", qqUIN),
+			zap.String("error_code", meta.WSCode),
+			zap.Error(berr),
+		)
+		reply = meta.WSMessage
 	}
 
 	payloadOut := protocol.QQSendPrivateMsgPayload{

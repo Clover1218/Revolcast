@@ -56,3 +56,12 @@ func (r *RedisRepo) AllowBindCodeAttempt(ctx context.Context, qqUIN int64, windo
 func AuthRateLimitKey(scope, subject string) string {
 	return authRateLimitKeyPrefix + scope + ":" + subject
 }
+
+// userRateLimitKeyPrefix 对应 HTTP 接口文档限流键名前缀：
+// revolcast:ratelimit:user:{scope}:{subject}，subject 为登录用户 user_id。
+const userRateLimitKeyPrefix = "revolcast:ratelimit:user:"
+
+// UserRateLimitKey 拼装已认证接口的限流键：revolcast:ratelimit:user:{scope}:{subject}。
+func UserRateLimitKey(scope, subject string) string {
+	return userRateLimitKeyPrefix + scope + ":" + subject
+}

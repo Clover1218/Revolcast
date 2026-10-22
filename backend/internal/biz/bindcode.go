@@ -60,7 +60,9 @@ func (s *BindCodeService) GenerateBindCode(ctx context.Context, qqUIN int64, bot
 	// 步骤 04：已绑定检查。
 	bound, err := s.pg.IsQQActiveBound(ctx, qqUIN)
 	if err != nil {
-		return "", ErrInternal
+		// 内部错误保留原因（errors.Is 仍匹配 ErrInternal），便于 handler 日志定位真实成因；
+		// 返回给用户的文案在 transport 层统一替换为友好提示，不泄露内部细节。
+		return "", Wrap(ErrInternal, err, "查询 QQ 绑定状态失败")
 	}
 	if bound {
 		return "", ErrQQAlreadyBound
@@ -69,17 +71,17 @@ func (s *BindCodeService) GenerateBindCode(ctx context.Context, qqUIN int64, bot
 	// 步骤 05：幂等取/建——已有未过期待使用码则直接返回。
 	code, _, found, err := s.pg.GetPendingBindCode(ctx, qqUIN)
 	if err != nil {
-		return "", ErrInternal
+		return "", Wrap(ErrInternal, err, "查询待使用绑定码失败")
 	}
 	if found {
 		return code, nil
 	}
 
-	// 步骤 06：持久化新码。
+	// 步骤 06：持久化新码（仓库层会先回收该 qq_uin 已过期的待使用码，避免唯一索引挡住插入）。
 	expiresAt := time.Now().UTC().Add(s.cfg.BindCodeTTL)
 	created, err := s.pg.CreateBindCode(ctx, qqUIN, botID, traceID, expiresAt)
 	if err != nil {
-		return "", ErrInternal
+		return "", Wrap(ErrInternal, err, "写入绑定码失败")
 	}
 	return created, nil
 }

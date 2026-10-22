@@ -66,10 +66,15 @@ func main() {
 		RateLimitMax:    3,
 	})
 
-	// HTTP 鉴权接口（BIZ-002 / BIZ-003）：复用同一份 DB/Redis/Logger。
+	// HTTP 鉴权接口（BIZ-002 / BIZ-003 / BIZ-004）：复用同一份 DB/Redis/Logger。
 	userRepo := repository.NewUserRepo(PostgreSQL)
-	authSvc := biz.NewAuthService(userRepo, redisRepo, biz.AuthConfig{})
-	authHandler := transport.NewAuthHandler(authSvc, baseLogger)
+	sessionRepo := repository.NewSessionRepo(PostgreSQL)
+	authSvc := biz.NewAuthService(userRepo, redisRepo, sessionRepo, biz.AuthConfig{SessionTTL: 30 * 24 * time.Hour})
+	authHandler := transport.NewAuthHandler(authSvc, baseLogger, cfg.App.Env == "production")
+
+	// HTTP 用户接口（BIZ-006 网站赎回 QQ 绑定码 / BIZ-007 网站解绑 QQ）：复用同一份 DB/Redis/Logger。
+	qqBindSvc := biz.NewQQBindService(sessionRepo, userRepo, pgRepo, redisRepo)
+	userHandler := transport.NewUserHandler(qqBindSvc, baseLogger, cfg.App.Env == "production")
 	pool := queue.NewPool(rootCtx, queue.Config{
 		Workers:        cfg.Queue.Workers,
 		QueueSize:      cfg.Queue.QueueSize,
@@ -84,6 +89,10 @@ func main() {
 	mux.HandleFunc("/ws", transport.ServeWS(hub, &cfg.WS, baseLogger))
 	mux.Handle("/api/v1/auth/check-name", transport.CORSMiddleware(http.HandlerFunc(authHandler.CheckName)))
 	mux.Handle("/api/v1/auth/register", transport.CORSMiddleware(http.HandlerFunc(authHandler.Register)))
+	mux.Handle("/api/v1/auth/login", transport.CORSMiddleware(http.HandlerFunc(authHandler.Login)))
+	mux.Handle("/api/v1/auth/logout", transport.CORSMiddleware(http.HandlerFunc(authHandler.Logout)))
+	mux.Handle("/api/v1/user/bind-QQ", transport.CORSMiddleware(http.HandlerFunc(userHandler.BindQQ)))
+	mux.Handle("/api/v1/user/unbind-QQ", transport.CORSMiddleware(http.HandlerFunc(userHandler.UnbindQQ)))
 	srv := &http.Server{
 		Addr:         cfg.WS.Addr,
 		Handler:      mux,
