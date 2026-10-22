@@ -46,6 +46,9 @@ type LogConfig struct {
 type WSConfig struct {
 	Addr  string `mapstructure:"addr"`  // e.g. ":8080"
 	Token string `mapstructure:"token"` // e.g. "zerobot_secret_key"
+	// AllowedOrigins 是浏览器 WebSocket 握手的 Origin 白名单（如 https://revolcast.cn）。
+	// 为空时：开发环境放行，生产环境拒绝所有浏览器来源（fail-closed）。
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 type DatabaseConfig struct {
@@ -103,6 +106,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("redis.db", 0)
 	v.SetDefault("ws.addr", ":8080")
 	v.SetDefault("ws.token", "123")
+	v.SetDefault("ws.allowed_origins", []string{})
 	v.SetDefault("queue.workers", runtime.NumCPU())
 	v.SetDefault("queue.queue_size", 4096)
 	v.SetDefault("queue.enqueue_timeout_ms", 200)

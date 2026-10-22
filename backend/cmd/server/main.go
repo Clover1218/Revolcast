@@ -99,11 +99,21 @@ func main() {
 	gameServerRepo := repository.NewGameServerRepo(PostgreSQL)
 	gameServerSvc := biz.NewGameServerService(gameServerRepo, redisRepo, biz.GameServerConfig{})
 
-	// 同一 Server 同时承载 WS（/api/v1/adapter/ws、/api/v1/game-servers/ws）与 HTTP API（/api/v1/*），复用监听与优雅关闭。
+	// 同一 Server 同时承载 WS 与 HTTP API（/api/v1/*），复用监听与优雅关闭。
+	// 三类 WS 接入端共用一套连接抽象与 Hub，但各自独立索引、独立协议处理。
+	wsOpts := transport.WSOptions{
+		Token:          cfg.WS.Token,
+		AllowedOrigins: cfg.WS.AllowedOrigins,
+		Production:     cfg.App.Env == "production",
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/adapter/ws", transport.ServeWS(hub, &cfg.WS, baseLogger, "adapter"))
-	// 游戏服务器接入：以 per-server API Secret 鉴权，clientID = game_servers.id（见 ServeGameServerWS）。
-	mux.HandleFunc("/api/v1/game-servers/ws", transport.ServeGameServerWS(hub, gameServerSvc, baseLogger))
+	mux.HandleFunc("/api/v1/adapter/ws", transport.ServeWS(hub, wsOpts, baseLogger, "adapter"))
+	// 游戏服务器接入：以 per-server API Secret 鉴权，连接标识为 server_code（见 ServeGameServerWS）。
+	mux.HandleFunc("/api/v1/game-servers/ws", transport.ServeGameServerWS(hub, gameServerSvc, wsOpts, baseLogger))
+	// 前端订阅单个服务器的游戏事件：Session Cookie 鉴权 + 握手限流 + server_code 校验（见 ServeWebWS）。
+	mux.HandleFunc("/api/v1/game-servers/{server_code}/ws",
+		transport.ServeWebWS(hub, authSvc, gameServerSvc, redisRepo, wsOpts, baseLogger))
 	mux.Handle("/api/v1/auth/check-name", transport.CORSMiddleware(http.HandlerFunc(authHandler.CheckName)))
 	mux.Handle("/api/v1/auth/register", transport.CORSMiddleware(http.HandlerFunc(authHandler.Register)))
 	mux.Handle("/api/v1/auth/login", transport.CORSMiddleware(http.HandlerFunc(authHandler.Login)))

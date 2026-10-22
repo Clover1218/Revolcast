@@ -43,6 +43,8 @@ var (
 	ErrServerCodeTaken = errors.New("server code taken")
 	// ErrServerNotFound 指定的游戏服务器不存在（按 code 查询无记录）。
 	ErrServerNotFound = errors.New("server not found")
+	// ErrServerDisabled 服务器存在但已停用（status != 1），不可订阅事件或接入。
+	ErrServerDisabled = errors.New("server disabled")
 )
 
 // ErrorMeta 是某个业务哨兵错误对外暴露的元数据，作为 HTTP 与 WS 导出的唯一依据。
@@ -160,6 +162,13 @@ var errorMeta = map[error]ErrorMeta{
 		HTTPMsg:    "server not found",
 		WSCode:     "SERVER_NOT_FOUND",
 		WSMessage:  "未找到指定的游戏服务器。",
+	},
+	ErrServerDisabled: {
+		HTTPStatus: http.StatusForbidden,
+		HTTPCode:   403,
+		HTTPMsg:    "server disabled",
+		WSCode:     "SERVER_DISABLED",
+		WSMessage:  "该游戏服务器已停用，暂不可用。",
 	},
 	ErrInternal: {
 		HTTPStatus: http.StatusInternalServerError,

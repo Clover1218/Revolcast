@@ -68,6 +68,10 @@ func (f *fakeSessionStore) RevokeSession(_ context.Context, _ string) (bool, err
 	return f.revokeAffected, f.revokeErr
 }
 
+func (f *fakeSessionStore) ResolveSession(_ context.Context, _ string) (int64, bool, error) {
+	return 0, false, nil
+}
+
 func newTestAuthHandler(createErr error, exists, allowed bool) *AuthHandler {
 	svc := biz.NewAuthService(
 		&fakeUserStore{exists: exists, createErr: createErr},

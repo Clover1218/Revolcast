@@ -317,12 +317,16 @@ func TestResolveServerBySecret_Success(t *testing.T) {
 	store := &fakeGameServerStore{bySecretHash: &repository.GameServerRecord{ID: 42, Code: "a", Name: "A", Status: 1}}
 	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
 
-	id, err := svc.ResolveServerBySecret(context.Background(), "raw-secret")
+	id, code, err := svc.ResolveServerBySecret(context.Background(), "raw-secret")
 	if err != nil {
 		t.Fatalf("期望鉴权成功，实际 %v", err)
 	}
 	if id != 42 {
 		t.Fatalf("期望返回 game_servers.id=42，实际 %d", id)
+	}
+	// 连接标识需使用 server_code（Hub 按 server_code 管理游戏服务器连接）。
+	if code != "a" {
+		t.Fatalf("期望返回 server_code=a，实际 %q", code)
 	}
 
 	// 必须对下发的原始串求 SHA-256（hex），与 api_secret_hash 的生成口径一致。
@@ -337,7 +341,7 @@ func TestResolveServerBySecret_NotFoundOrDisabled(t *testing.T) {
 	store := &fakeGameServerStore{secretHashErr: repository.ErrServerNotFound}
 	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
 
-	if _, err := svc.ResolveServerBySecret(context.Background(), "wrong"); !errors.Is(err, ErrServerNotFound) {
+	if _, _, err := svc.ResolveServerBySecret(context.Background(), "wrong"); !errors.Is(err, ErrServerNotFound) {
 		t.Fatalf("期望 ErrServerNotFound，实际 %v", err)
 	}
 }
@@ -346,12 +350,68 @@ func TestResolveServerBySecret_StoreInternal(t *testing.T) {
 	store := &fakeGameServerStore{secretHashErr: errors.New("pg: connection refused")}
 	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
 
-	_, err := svc.ResolveServerBySecret(context.Background(), "raw-secret")
+	_, _, err := svc.ResolveServerBySecret(context.Background(), "raw-secret")
 	if !errors.Is(err, ErrInternal) {
 		t.Fatalf("期望 ErrInternal，实际 %v", err)
 	}
 	// 错误链须携带根因，便于内部日志定位。
 	if !strings.Contains(err.Error(), "pg: connection refused") {
 		t.Fatalf("期望错误链包含根因，实际 %v", err)
+	}
+}
+
+// ---- ResolveSubscribableServer（Web WS 订阅校验）----
+
+func TestResolveSubscribableServer_OK(t *testing.T) {
+	store := &fakeGameServerStore{byCode: &repository.GameServerRecord{ID: 3, Code: "survival", Status: 1}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+
+	rec, err := svc.ResolveSubscribableServer(context.Background(), "survival")
+	if err != nil {
+		t.Fatalf("期望校验通过，实际 %v", err)
+	}
+	if rec.ID != 3 || rec.Code != "survival" {
+		t.Fatalf("返回记录不符: %+v", rec)
+	}
+}
+
+func TestResolveSubscribableServer_InvalidCode(t *testing.T) {
+	store := &fakeGameServerStore{byCode: &repository.GameServerRecord{ID: 3, Code: "survival", Status: 1}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+
+	// 非法格式直接拒绝，不查库。
+	if _, err := svc.ResolveSubscribableServer(context.Background(), "Bad_Code"); !errors.Is(err, ErrServerCodeInvalid) {
+		t.Fatalf("期望 ErrServerCodeInvalid，实际 %v", err)
+	}
+}
+
+func TestResolveSubscribableServer_NotFound(t *testing.T) {
+	store := &fakeGameServerStore{getErr: repository.ErrServerNotFound}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	if _, err := svc.ResolveSubscribableServer(context.Background(), "missing"); !errors.Is(err, ErrServerNotFound) {
+		t.Fatalf("期望 ErrServerNotFound，实际 %v", err)
+	}
+}
+
+// TestResolveSubscribableServer_Disabled 已停用服务器的订阅必须被拒绝（403 SERVER_DISABLED），
+// 与「服务器不存在」（404）区分开，便于前端提示。
+func TestResolveSubscribableServer_Disabled(t *testing.T) {
+	store := &fakeGameServerStore{byCode: &repository.GameServerRecord{ID: 3, Code: "survival", Status: 0}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+
+	_, err := svc.ResolveSubscribableServer(context.Background(), "survival")
+	if !errors.Is(err, ErrServerDisabled) {
+		t.Fatalf("期望 ErrServerDisabled，实际 %v", err)
+	}
+	if meta := ResolveErrorMeta(err); meta.HTTPStatus != 403 || meta.HTTPCode != 403 {
+		t.Fatalf("停用服务器应映射为 403，实际 %+v", meta)
+	}
+}
+
+func TestResolveSubscribableServer_StoreError(t *testing.T) {
+	store := &fakeGameServerStore{getErr: errors.New("pg down")}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	if _, err := svc.ResolveSubscribableServer(context.Background(), "survival"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("期望 ErrInternal，实际 %v", err)
 	}
 }

@@ -44,6 +44,9 @@ redis:
 ws:
   addr: "localhost:8080"
   token: "123"
+  # 浏览器 WebSocket 握手的 Origin 白名单（生产环境必须配置，否则拒绝所有浏览器来源）
+  # 例：["https://revolcast.cn", "https://www.revolcast.cn"]
+  allowed_origins: []
 
 # 业务队列（Worker Pool）：生产者-消费者模型，readPump 投递、业务 Handler 消费
 queue:

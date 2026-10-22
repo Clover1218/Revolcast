@@ -61,6 +61,10 @@ type fakeSessionStore struct {
 	revokeAffected   bool
 	revokeErr        error
 	revokedHash      string
+	resolveUserID    int64
+	resolveOK        bool
+	resolveErr       error
+	resolvedHash     string
 }
 
 func (f *fakeSessionStore) CreateSession(_ context.Context, userID int64, tokenHash, _ string, _ time.Time) error {
@@ -73,6 +77,11 @@ func (f *fakeSessionStore) CreateSession(_ context.Context, userID int64, tokenH
 func (f *fakeSessionStore) RevokeSession(_ context.Context, tokenHash string) (bool, error) {
 	f.revokedHash = tokenHash
 	return f.revokeAffected, f.revokeErr
+}
+
+func (f *fakeSessionStore) ResolveSession(_ context.Context, tokenHash string) (int64, bool, error) {
+	f.resolvedHash = tokenHash
+	return f.resolveUserID, f.resolveOK, f.resolveErr
 }
 
 // ---- CheckUsername ----
@@ -384,6 +393,10 @@ func (f *matchingSessionStore) RevokeSession(_ context.Context, tokenHash string
 	return tokenHash != "" && tokenHash == f.tokenHash, nil
 }
 
+func (f *matchingSessionStore) ResolveSession(_ context.Context, tokenHash string) (int64, bool, error) {
+	return 7, tokenHash != "" && tokenHash == f.tokenHash, nil
+}
+
 // TestLoginThenLogout_RoundTrip 登录下发的原始 Token 必须能通过校验侧哈希匹配（端到端锁定哈希链路）。
 func TestLoginThenLogout_RoundTrip(t *testing.T) {
 	pwHash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcryptCost)
@@ -401,5 +414,42 @@ func TestLoginThenLogout_RoundTrip(t *testing.T) {
 	}
 	if err := svc.Logout(context.Background(), raw); err != nil {
 		t.Fatalf("用登录返回的原始 Token 登出应成功（哈希必须一致），实际 %v", err)
+	}
+}
+
+// TestResolveUserID_RoundTrip 锁定 WebSocket 握手复用会话鉴权时的哈希链路：
+// 登录下发的原始 Token 必须能被 ResolveUserID 解析为同一 user_id，错误 Token 一律 ErrNotAuthenticated。
+func TestResolveUserID_RoundTrip(t *testing.T) {
+	pwHash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcryptCost)
+	svc := NewAuthService(
+		&fakeUserStore{user: &repository.UserRecord{ID: 7, PasswordHash: string(pwHash), Status: 1}},
+		&fakeRateLimiter{allowed: true},
+		&matchingSessionStore{},
+		AuthConfig{},
+	)
+
+	raw, _, err := svc.Login(context.Background(), "1.2.3.4", "clover", "password123", "unittest")
+	if err != nil {
+		t.Fatalf("登录不应报错: %v", err)
+	}
+
+	uid, err := svc.ResolveUserID(context.Background(), raw)
+	if err != nil || uid != 7 {
+		t.Fatalf("原始 Token 应解析出 userID=7，实际 uid=%d err=%v", uid, err)
+	}
+	if _, err := svc.ResolveUserID(context.Background(), "not-a-real-token"); !errors.Is(err, ErrNotAuthenticated) {
+		t.Fatalf("无效 Token 应返回 ErrNotAuthenticated，实际 %v", err)
+	}
+	if _, err := svc.ResolveUserID(context.Background(), ""); !errors.Is(err, ErrNotAuthenticated) {
+		t.Fatalf("空 Token 应返回 ErrNotAuthenticated，实际 %v", err)
+	}
+}
+
+// TestResolveUserID_DBError 会话解析的 DB 错误必须包裹为 ErrInternal 并保留根因。
+func TestResolveUserID_DBError(t *testing.T) {
+	svc := NewAuthService(&fakeUserStore{}, &fakeRateLimiter{allowed: true},
+		&fakeSessionStore{resolveErr: errors.New("pg down")}, AuthConfig{})
+	if _, err := svc.ResolveUserID(context.Background(), "token"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("期望 ErrInternal，实际 %v", err)
 	}
 }

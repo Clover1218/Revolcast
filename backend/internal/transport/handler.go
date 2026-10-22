@@ -35,9 +35,9 @@ func NewBizHandler(hub *Hub, logger *zap.Logger, svc *biz.BindCodeService, gameE
 			zap.String("msg_type", task.Type),
 		)
 
-		// 游戏服务器（mc_server）上报的事件：直接落库，无回传指令。
+		// 游戏服务器（mc_server）上报的事件：直接落库，落库成功后推送给订阅的 Web 客户端。
 		if isGameEventType(task.Type) {
-			return handleGameEvent(ctx, task, gameEventSvc, log)
+			return handleGameEvent(ctx, task, hub, gameEventSvc, log)
 		}
 
 		// 业务分发：按 envelope.type 路由，返回需要下发的指令（可为 nil）。
@@ -145,17 +145,20 @@ func isGameEventType(t string) bool {
 	return false
 }
 
-// handleGameEvent 处理鹊桥上报的游戏事件：解析 payload → 从 WS 已鉴权身份取 serverID → 落库。
+// handleGameEvent 处理鹊桥上报的游戏事件：解析 payload → 从 WS 已鉴权身份取 serverID → 落库 → 推送 Web 订阅者。
 // 解析失败或来源 client_id 非 server_id 时记日志并丢弃（不向前抛，避免污染队列指标）。
 // 业务错误（未知 sub_type / Mongo 写入失败）由 biz 内部 Wrap 携带根因，这里记 Warn 日志（含 trace）便于排查。
-func handleGameEvent(ctx context.Context, task queue.Task, svc *biz.GameEventService, log *zap.Logger) error {
+//
+// 推送时机：仅在落库成功（Ingest 返回 view）后推送，避免把未持久化的事件散播给前端；
+// 推送失败不影响返回结果（落库是权威事实，推送是尽力而为）。
+func handleGameEvent(ctx context.Context, task queue.Task, hub *Hub, svc *biz.GameEventService, log *zap.Logger) error {
 	var payload protocol.GameEventPayload
 	if err := task.Decode(&payload); err != nil {
 		log.Warn("解析游戏事件 payload 失败", zap.Error(err))
 		return nil
 	}
 
-	// server_id 来自 WS 已鉴权身份（clientID = game_servers.id），不从 server_name 反查。
+	// server_id 来自 WS 已鉴权身份（与连接身份一致），不从 server_name 反查。
 	serverID, err := strconv.ParseInt(task.ClientID, 10, 64)
 	if err != nil {
 		log.Warn("游戏事件来源 client_id 非 server_id，丢弃",
@@ -163,11 +166,14 @@ func handleGameEvent(ctx context.Context, task queue.Task, svc *biz.GameEventSer
 		return nil
 	}
 
-	if err := svc.Ingest(ctx, serverID, task.ReceivedAt, &payload); err != nil {
+	view, err := svc.Ingest(ctx, serverID, task.ReceivedAt, &payload)
+	if err != nil {
 		log.Warn("处理游戏事件失败",
 			zap.String("error_code", biz.ResolveErrorMeta(err).WSCode),
 			zap.Error(err))
 		return err
 	}
+
+	pushGameEventToWeb(hub, task.TraceID, view, log)
 	return nil
 }

@@ -7,8 +7,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// parseOnlyAdapter 构造仅用于解析测试的 Adapter 连接（不触碰底层 conn / hub）。
+func parseOnlyAdapter(clientID string) *AdapterClient {
+	return newAdapterClient(nil, nil, clientID, zap.NewNop())
+}
+
+// parseOnlyGameServer 构造仅用于解析测试的游戏服务器连接。
+func parseOnlyGameServer(serverID int64, code string) *GameServerClient {
+	return newGameServerClient(nil, nil, serverID, code, zap.NewNop())
+}
+
 func TestParseGameServerEvent_OK(t *testing.T) {
-	c := &Client{ClientType: "mc_server", ClientID: "42", logger: zap.NewNop()}
+	c := parseOnlyGameServer(42, "survival")
 	raw := []byte(`{"sub_type":"player_join","timestamp":1792395025,"server_name":"TestServer","player":{"uuid":"u","nickname":"n","is_op":true}}`)
 
 	task, ok := c.parseGameServerEvent(raw)
@@ -18,6 +28,7 @@ func TestParseGameServerEvent_OK(t *testing.T) {
 	if task.Type != "event.game.player_join" {
 		t.Errorf("Type = %q, want event.game.player_join", task.Type)
 	}
+	// 业务归属必须是已鉴权的 server_id（而非 server_code），与事件落库规则一致。
 	if task.ClientID != "42" {
 		t.Errorf("ClientID = %q, want 42", task.ClientID)
 	}
@@ -35,21 +46,21 @@ func TestParseGameServerEvent_OK(t *testing.T) {
 }
 
 func TestParseGameServerEvent_MissingSubType(t *testing.T) {
-	c := &Client{ClientType: "mc_server", logger: zap.NewNop()}
+	c := parseOnlyGameServer(1, "s")
 	if _, ok := c.parseGameServerEvent([]byte(`{"timestamp":1}`)); ok {
 		t.Fatal("缺少 sub_type 应返回 ok=false")
 	}
 }
 
 func TestParseGameServerEvent_InvalidJSON(t *testing.T) {
-	c := &Client{ClientType: "mc_server", logger: zap.NewNop()}
+	c := parseOnlyGameServer(1, "s")
 	if _, ok := c.parseGameServerEvent([]byte("not-json")); ok {
 		t.Fatal("非法 JSON 应返回 ok=false")
 	}
 }
 
 func TestParseEnvelopeEvent_OK(t *testing.T) {
-	c := &Client{ClientType: "adapter", logger: zap.NewNop()}
+	c := parseOnlyAdapter("bot-1")
 	raw := []byte(`{"version":"v1","type":"event.qq.message.private","trace_id":"t1","payload":{"a":1}}`)
 
 	task, ok := c.parseEnvelopeEvent(raw)
@@ -58,6 +69,9 @@ func TestParseEnvelopeEvent_OK(t *testing.T) {
 	}
 	if task.Type != "event.qq.message.private" || task.TraceID != "t1" {
 		t.Errorf("Envelope 解析错误: %+v", task)
+	}
+	if task.ClientID != "bot-1" {
+		t.Errorf("ClientID = %q, want bot-1", task.ClientID)
 	}
 }
 

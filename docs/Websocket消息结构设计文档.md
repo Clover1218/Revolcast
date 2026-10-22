@@ -36,9 +36,12 @@ Type字段基本格式如下：
 | :--- | :--- | :--- | :--- |
 | `/api/v1/adapter/ws` | `adapter` | 共享密钥（配置 `ws.token`） | QQ 机器人适配器（Revolcast-qq-adapter） |
 | `/api/v1/game-servers/ws` | `mc_server` | per-server API Secret（`game_servers`） | Minecraft 服务器及未来服务端类接入端 |
+| `/api/v1/game-servers/{server_code}/ws` | `web` | Session Cookie（`revolcast_session`） | 网站前端（已登录用户订阅单个服务器的游戏事件） |
 
 - **client_type 由路由决定，客户端不可自行声明**，从而避免冒用其他接入端类型。
 - `wss`（TLS）由部署层 / 后续迭代处理（如 nginx 统一 TLS 终止），不在应用层强制。
+- 三类连接共用同一套连接抽象（`transport/ws_conn.go`）与 Hub（`transport/ws_hub.go`），
+  但索引、协议解析与业务处理彼此独立：`web` 连接的上行消息不会进入 Adapter / GameServer 的处理链路。
 
 ### 连接查询参数
 
@@ -56,11 +59,74 @@ Type字段基本格式如下：
 3. 身份由 secret 派生，客户端无法自报或冒用其他服务器；`client_id` 参数被忽略。
 4. 服务器被停用或轮换 secret 后，旧连接**不会被立即断开**（下次重连才校验），如需强制下线见后续迭代。
 
+### `/api/v1/game-servers/{server_code}/ws` 前端订阅（Web → Backend）
+
+前端通过该路由订阅**单个**服务器的游戏事件，服务端只推送该 `server_code` 的事件，不做全局广播。
+
+**握手流程**（任一步失败都不升级连接，错误以 HTTP 统一响应体返回，见《HTTP 接口设计文档》§1.1）：
+
+1. **Origin 校验**：按 `ws.allowed_origins` 白名单精确匹配（大小写与末尾斜杠已归一化）。
+   白名单为空时：开发环境放行，生产环境拒绝所有浏览器来源（fail-closed）。不通过返回 `403`。
+2. **会话鉴权**：从 Cookie `revolcast_session` 取原始 Token，经 `biz.AuthService.ResolveUserID`
+   （与登录/登出同源哈希）解析出 `user_id`；缺失 / 会话失效返回 `401`，**不升级连接**。
+3. **握手限流**：Redis 共享计数，5 分钟窗口，按 `user_id`（20 次）与客户端 IP（60 次）双维度，
+   任一命中返回 `429`。连接建立后的消息与心跳不计数；前端断线重连因会重新握手而纳入限流。
+4. **订阅目标校验**：`server_code` 格式非法 `400`、不存在 `404`、已停用 `403`（`SERVER_DISABLED`）。
+5. 升级连接 → 创建 Web 连接 → 注册 Hub（仅接收该 `server_code` 的事件）。
+
+**连接标识**：
+
+| 项 | 说明 |
+| :--- | :--- |
+| `connection_id` | 服务端为每条连接生成的 32 字符随机串，是 Hub 的唯一索引键 |
+| `user_id` | 握手解析得到的登录用户，用于「按用户推送」 |
+| `server_code` / `server_id` | 订阅目标；事件推送按 `server_code` 分桶，事件归属由 `server_id` 定位 |
+
+- **Session Token 不作为连接标识**：Token 是可撤销凭证，只用于握手鉴权，绝不作为 Map 键。
+- 同一用户可同时建立多条 Web 连接（多标签页 / 多设备），彼此不互斥、不踢旧。
+
+### 推送消息：`event.game.<sub_type>`
+
+游戏事件**落库成功后**，推送给订阅该服务器的全部 Web 连接（不广播给其他服务器）。
+
+```json
+{
+  "version": "v1",
+  "type": "event.game.player_chat",
+  "trace_id": "与产生该事件的链路一致",
+  "payload": {
+    "server_code": "survival",
+    "server_id": 10,
+    "event_type": "player_chat",
+    "player": { "uuid": "a3b91ae7", "nickname": "Clover", "is_op": false },
+    "occurred_at": "2026-10-19T07:30:25Z",
+    "received_at": "2026-10-19T07:30:25.125Z",
+    "data": { "message": "hello", "raw_message": "{\"text\":\"hello\"}", "message_id": "m1" }
+  }
+}
+```
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `type` | `event.game.player_join` / `player_quit` / `player_chat` / `player_command` |
+| `server_code` / `server_id` | 事件所属服务器（`server_id` 由服务端已鉴权身份派生，不可由 `server_name` 反查） |
+| `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339Nano 字符串 |
+| `data` | join/quit 为 `{}`；chat 为 `{message, raw_message, message_id}`；command 为 `{command, message_id}` |
+
+- `data.raw_message` 仅 chat 下发（Minecraft 文本组件 JSON）；command 的 `raw_message` 是 Java 对象 `toString`，无业务价值，不下发。
+- 推送是**尽力而为**：单个连接发送队列满时只丢弃该连接的消息，不影响落库结果与其他连接。
+- 消息外层仍是统一 Envelope，与 Adapter / GameServer 共用协议封装，但**消息方向不同**：这是 `event.*`（服务端 → 前端），不涉及 `command.*`。
+
 ### 身份与连接约束
 
-- **单身份单连接**：同一 `client_id` 同时只允许一个有效连接。出现重复连接时，服务端**踢掉旧连接**由新连接接管；旧连接随后自动注销，不会误删新映射。对 `mc_server` 而言同一台服务器重连即触发踢旧，天然避免重复在线。
-- **回传路由**：业务层通过 `client_id` 调用 `SendToClient` 回传指令；客户端不在线或发送队列满时返回失败，调用方（Worker）不因此阻塞。`mc_server` 场景下 `client_id` 即 `game_servers.id`，可直接据此查询服务器信息。
-- **凭证与身份分离**：`adapter` 仍为共享 Token + 自声明 `client_id`；`mc_server` 已改为 per-server 独立凭证（secret 派生身份）。后续引入权限模型时，应在连接建立处补充服务器级权限校验（如服务器是否被允许承载某玩家）。
+- **单身份单连接**：同一接入端身份同时只允许一个有效连接。出现重复连接时，服务端**踢掉旧连接**由新连接接管；旧连接随后自动注销，不会误删新映射。
+  - `adapter` 的身份键是 `client_id`（如 `revolcast-qq-bot`）；
+  - `mc_server` 的身份键是 `server_code`（同一台服务器重连即触发踢旧，天然避免重复在线）；
+  - `web` 每条连接独立（`connection_id`），不做互斥替换。
+- **索引隔离**：Hub 为三类接入端各自维护连接索引，标识相同的字符串在不同接入端之间互不冲突（见 `transport/ws_hub.go`）。
+- **回传路由**：业务层通过 `SendToClient(clientID)` 回传指令（先查 adapter 的 `client_id`，再查 `server_code`）；客户端不在线或发送队列满时返回失败，调用方（Worker）不因此阻塞。
+- **业务归属**：`mc_server` 上报事件时，业务层使用的服务器身份是 `game_servers.id`（十进制字符串，来自已鉴权身份），连接索引键仍是 `server_code`，二者不可混用。
+- **凭证与身份分离**：`adapter` 仍为共享 Token + 自声明 `client_id`；`mc_server` 为 per-server 独立凭证（secret 派生身份）；`web` 为登录会话 Cookie（Token 仅用于鉴权，不参与连接标识）。后续引入权限模型时，应在连接建立处补充服务器级权限校验（例如 `server_game_bindings` 归属校验与隐身角色过滤）。
 
 ## 2. Adapter → Backend
 
@@ -517,6 +583,9 @@ const (
 | `ACCOUNT_DISABLED` | 账号被禁用（status != 1） | 登录 / 绑定被禁用账号 |
 | `NOT_AUTHENTICATED` | 未认证 / 会话失效 | 未携带有效会话 Cookie 或会话已撤销/过期 |
 | `USERNAME_TAKEN` | 用户名已被占用 | 注册时用户名唯一约束冲突 |
+| `SERVER_CODE_INVALID` | 服务器标识格式非法 | Web WS 订阅路径中的 `server_code` 不符合 `^[a-z0-9-]+$` 或长度超限 |
+| `SERVER_NOT_FOUND` | 服务器不存在 | Web WS 订阅的 `server_code` 查询无记录 |
+| `SERVER_DISABLED` | 服务器已停用 | Web WS 订阅的服务器 `status != 1` |
 
 > **单一映射源（single source of truth）**：上表的 `error_code` 字符串由 `backend/internal/biz/errors.go` 的 `errorMeta[...].WSCode` 统一定义，并通过 `biz.ResolveErrorMeta(err).WSCode` 在 WS 出口（如 `transport/handler.go` 生成绑定码失败的回复）自动推导；`protocol/qq.go` 中 `ErrorCodeXxx` 常量是其在消息层面对应的引用，二者必须保持一致。后续新增业务时请先在 `biz/errors.go` 的 `errorMeta` 登记，再同步本表，避免漂移。
 >

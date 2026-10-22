@@ -43,10 +43,12 @@ type RateLimiter interface {
 	AllowAttempt(ctx context.Context, key string, window time.Duration, max int64) (bool, error)
 }
 
-// SessionStore 是 AuthService 对会话写入/撤销的依赖（便于测试注入 fake）。
+// SessionStore 是 AuthService 对会话写入/撤销/解析的依赖（便于测试注入 fake）。
 type SessionStore interface {
 	CreateSession(ctx context.Context, userID int64, tokenHash, deviceName string, expiresAt time.Time) error
 	RevokeSession(ctx context.Context, tokenHash string) (affected bool, err error)
+	// ResolveSession 由 Token 哈希解析出 user_id；ok=false 表示会话不存在/已撤销/已过期。
+	ResolveSession(ctx context.Context, tokenHash string) (userID int64, ok bool, err error)
 }
 
 // AuthConfig 鉴权业务 tunable 参数。
@@ -244,6 +246,24 @@ func (s *AuthService) Login(ctx context.Context, ip, rawUsername, password, devi
 		return "", time.Time{}, Wrap(ErrInternal, cErr, "写入会话失败")
 	}
 	return raw, expiresAt, nil
+}
+
+// ResolveUserID 将会话原始 Token 解析为 user_id（并顺带刷新 last_seen_at）。
+// 供 WebSocket 等非 HTTP 请求-响应入口复用会话鉴权：rawToken 为 Cookie 中的原始会话串，
+// 内部统一走 sessionTokenHash，与 Login / Logout 完全同源（见本文件会话 Token 哈希约定）。
+// 无有效会话（Token 为空 / 不存在 / 已撤销 / 已过期）返回 ErrNotAuthenticated，DB 错误返回 ErrInternal。
+func (s *AuthService) ResolveUserID(ctx context.Context, rawToken string) (int64, error) {
+	if rawToken == "" {
+		return 0, ErrNotAuthenticated
+	}
+	userID, ok, err := s.sessions.ResolveSession(ctx, sessionTokenHash(rawToken))
+	if err != nil {
+		return 0, Wrap(ErrInternal, err, "解析会话失败")
+	}
+	if !ok {
+		return 0, ErrNotAuthenticated
+	}
+	return userID, nil
 }
 
 // Logout 实现 BIZ-005：按原始 Token 撤销当前会话（软删除 revoked_at）。

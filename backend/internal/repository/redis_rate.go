@@ -74,3 +74,13 @@ const serverRateLimitKeyPrefix = "revolcast:ratelimit:server:"
 func ServerRateLimitKey(scope, subject string) string {
 	return serverRateLimitKeyPrefix + scope + ":" + subject
 }
+
+// wsRateLimitKeyPrefix 对应 WebSocket 握手限流的键名前缀：
+// revolcast:ratelimit:ws:{scope}:{subject}，scope 为 handshake_user / handshake_ip，
+// subject 分别为 user_id 与客户端 IP。Redis 为共享计数，多实例部署下配额一致。
+const wsRateLimitKeyPrefix = "revolcast:ratelimit:ws:"
+
+// WSRateLimitKey 拼装 WebSocket 相关限流键：revolcast:ratelimit:ws:{scope}:{subject}。
+func WSRateLimitKey(scope, subject string) string {
+	return wsRateLimitKeyPrefix + scope + ":" + subject
+}

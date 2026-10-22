@@ -69,6 +69,7 @@
 | 更新游戏服务器 | `PATCH` | `/api/v1/game-servers/{code}` | 部分更新 name/description/status（code 与密钥不可改；管理接口，当前暂不鉴权） |
 | 禁用游戏服务器 | `DELETE` | `/api/v1/game-servers/{code}` | 软禁用（status 1→0），保留审计与 FK 引用（管理接口，当前暂不鉴权） |
 | 轮换服务器密钥 | `POST` | `/api/v1/game-servers/{code}/rotate-secret` | 轮换 API Secret，返回一次性新 secret（管理接口，当前暂不鉴权） |
+| 订阅服务器事件流 | `GET` (WS) | `/api/v1/game-servers/{server_code}/ws` | 已登录用户通过 Session Cookie 订阅单个服务器的游戏事件推送（握手校验会话、限流、Origin 与 server_code，见 §12.10） |
 
 > `check-name`、`register`、`login` 为**未认证**接口（注册/查重发生在登录之前），限流 `subject` 取客户端 IP，而非用户身份；`bind-QQ`、`unbind-QQ` 为**已认证**接口，需携带 `revolcast_session` Cookie，限流 `subject` 取登录用户 `user_id`。
 
@@ -500,6 +501,10 @@ check-name、register、login 均为未认证接口，限流 `subject` 默认取
 | unbind-QQ | `revolcast:ratelimit:user:unbind_qq:{user_id}` | 5 分钟 | 5 次 | 登录用户 `user_id`（已认证接口，见 §8） |
 | game-servers 管理 | `revolcast:ratelimit:server:manage:{ip}` | 5 分钟 | 20 次 | 客户端 IP（创建/更新/禁用/轮换，当前暂不鉴权，见 §12） |
 | game-servers 读 | `revolcast:ratelimit:server:read:{ip}` | 5 分钟 | 60 次 | 客户端 IP（列表/详情，公开，见 §12） |
+| WS 握手（用户） | `revolcast:ratelimit:ws:handshake_user:{user_id}` | 5 分钟 | 20 次 | 登录用户 `user_id`（§12.10） |
+| WS 握手（IP） | `revolcast:ratelimit:ws:handshake_ip:{ip}` | 5 分钟 | 60 次 | 客户端 IP（§12.10） |
+
+> WebSocket 握手限流**只统计握手**：连接建立后的消息传输与心跳不计数；前端断线重连会重新握手，因此重连同样受配额约束。
 
 > 限流为短期防刷保护，Redis 数据可重建；业务唯一性/正确性仍由 PostgreSQL 约束保证（见 §4.4）。
 
@@ -520,6 +525,7 @@ HTTP 接口的 `code` 与 HTTP 状态码对齐，错误类别与《WebSocket 消
 | `401` | 401 | 未授权 / 凭证错误 | 登录用户名不存在、密码错误或账号不可用（统一返回，防枚举）；登出/bind-QQ/unbind-QQ 未携带有效会话亦返回 401 |
 | `409` | 409 | 资源冲突（唯一约束 / 状态冲突） | 注册时用户名已存在（应用层预检命中或数据库唯一约束兜底）；bind-QQ 时该账号已绑定其他 QQ（`user already bound`），或该 QQ 已被其他账号绑定（`qq already bound`）；unbind-QQ 时该账号当前无有效 QQ 绑定（`not bound`）；创建游戏服务器时 code 已被占用（`server code taken`，见 §12） |
 | `404` | 404 | 资源不存在 | 按 code 查询/操作游戏服务器但不存在（`server not found`，见 §12） |
+| `403` | 403 | 无权限 / 目标不可用 | Web WS 握手 Origin 不在白名单；订阅的服务器已停用（`server disabled`）；账号被禁用（`account disabled`） |
 | `429` | 429 | 触发限流 | 命中 Redis 限流计数（`RATE_LIMITED` 类别） |
 | `500` | 500 | 服务端内部错误 | 数据库写入/查询失败等（`INTERNAL_ERROR` 类别） |
 
@@ -672,5 +678,30 @@ HTTP 接口的 `code` 与 HTTP 状态码对齐，错误类别与《WebSocket 消
 
 ### 12.9 后续依赖（不在本接口范围）
 
-- **WS 鉴权升级（已落地）：** `/api/v1/game-servers/ws` 不再使用全局 `cfg.WS.Token`，改为「对 `query.token`（原始 API Secret）取 `SHA256` 后按 `api_secret_hash` 查 `game_servers` + 要求 `status=1`」，命中则 `clientID = game_servers.id`；不再接受自声明的 `client_id`。详见《Websocket消息结构设计文档》「WS 连接与接入端身份」与《WS游戏服务器鉴权改造方案》。
+- **WS 鉴权升级（已落地）：** `/api/v1/game-servers/ws` 不再使用全局 `cfg.WS.Token`，改为「对 `query.token`（原始 API Secret）取 `SHA256` 后按 `api_secret_hash` 查 `game_servers` + 要求 `status=1`」，命中则连接标识为 `server_code`、业务归属为 `game_servers.id`；不再接受自声明的 `client_id`。详见《Websocket消息结构设计文档》「WS 连接与接入端身份」与《WS游戏服务器鉴权改造方案》。
 - **角色系统：** 管理接口接入管理员判定后，移除 `TODO(role-system)` 并在 transport 层强制鉴权。
+
+### 12.10 `GET /api/v1/game-servers/{server_code}/ws` — 前端订阅服务器事件（WebSocket）
+
+**业务目标：** 已登录用户订阅**单个**服务器的游戏事件流，服务端在事件落库成功后推送，不做全局广播。
+
+**握手顺序**（任一步失败都不升级连接，错误使用 §1.1 统一信封）：
+
+| 步骤 | 校验 | 失败响应 |
+| --- | --- | --- |
+| 1 | Origin 白名单（`ws.allowed_origins`，精确匹配） | `403`（`origin not allowed`） |
+| 2 | Cookie `revolcast_session` → `biz.AuthService.ResolveUserID` | `401`（`not authenticated`） |
+| 3 | 握手限流（§9 表中 ws 两条键，任一命中） | `429` |
+| 4 | `server_code` 格式 / 存在 / 启用 | `400` / `404`（`server not found`）/ `403`（`server disabled`） |
+| 5 | 升级 → 创建 Web 连接 → 注册 Hub | — |
+
+**连接标识：** `connection_id`（服务端生成，32 字符随机串）+ `user_id`（会话解析）+ `server_code` / `server_id`（订阅目标）。
+Session Token **只用于鉴权，不作为连接标识**；同一用户可并存多条连接。
+
+**Origin 策略：** 白名单非空时必须携带 Origin 且命中；白名单为空时开发环境放行、生产环境一律拒绝（fail-closed）。
+
+**推送消息：** `type = event.game.<sub_type>`，`payload` 含 `server_code` / `server_id` / `event_type` / `player` / `occurred_at` / `received_at` / `data`，
+详见《Websocket消息结构设计文档》「推送消息：`event.game.<sub_type>`」。
+
+**当前边界：** 本轮仅校验登录与服务器可用性，**未**接入 `server_game_bindings` 的归属与 `visibility`（公开/隐身）过滤；
+数据库文档 §1.1 规则 6 要求的「可见性规则须在 WebSocket 推送处统一执行」将在角色绑定能力落地时补齐（代码中以 TODO(visibility) 标注接入点）。

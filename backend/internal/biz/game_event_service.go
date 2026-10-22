@@ -40,59 +40,88 @@ func NewGameEventService(store GameEventStore) *GameEventService {
 	return &GameEventService{store: store}
 }
 
+// GameEventView 是已落库游戏事件的规范化视图，供 Web 端 WebSocket 推送使用。
+// 时间转换规则与落库文档同源（由 Ingest 统一产出），避免推送与存储两处各写一套导致漂移。
+type GameEventView struct {
+	ServerID   int64                  // 已鉴权的 game_servers.id（来自 WS 连接身份）
+	ServerName string                 // 事件上报的服务器名快照，仅展示
+	EventType  string                 // player_join / player_quit / player_chat / player_command
+	Player     protocol.QueqiaoPlayer // 玩家快照
+	OccurredAt time.Time              // 事件发生时间（由原始秒级 timestamp 还原）
+	ReceivedAt time.Time              // 后端收到时间
+	Message    string                 // 仅 player_chat
+	RawMessage string                 // player_chat: 文本组件 JSON；player_command: 无业务价值
+	MessageID  string                 // 聊天/命令事件
+	Command    string                 // 仅 player_command（不含前导 /）
+}
+
 // Ingest 接收已鉴权服务器（serverID 来自 WS 已鉴权身份，不得由 server_name 反查）上报的原始事件，
-// 转换后写入 MongoDB。receivedAt 为后端收到事件的时间（来自 WS readPump，UTC）。
+// 转换后写入 MongoDB，并返回规范化视图供调用方（Web 推送）复用。
+// 参数 receivedAt 为后端收到事件的时间（来自 WS readPump，UTC）。
 //
 // 未知 sub_type 或空事件返回 ErrInvalidParam；写入失败包裹为 ErrInternal 并保留根因（供日志输出完整链）。
-func (s *GameEventService) Ingest(ctx context.Context, serverID int64, receivedAt time.Time, ev *protocol.GameEventPayload) error {
+// 返回值 nil 表示事件未被接受（此时不会写入存储），调用方不得据此推送。
+func (s *GameEventService) Ingest(ctx context.Context, serverID int64, receivedAt time.Time, ev *protocol.GameEventPayload) (*GameEventView, error) {
 	if ev == nil {
-		return Wrap(ErrInvalidParam, nil, "游戏事件为空")
+		return nil, Wrap(ErrInvalidParam, nil, "游戏事件为空")
 	}
 	if _, ok := knownGameEventSubTypes[ev.SubType]; !ok {
-		return Wrap(ErrInvalidParam, nil, fmt.Sprintf("未知游戏事件子类型: %s", ev.SubType))
+		return nil, Wrap(ErrInvalidParam, nil, fmt.Sprintf("未知游戏事件子类型: %s", ev.SubType))
+	}
+
+	view := &GameEventView{
+		ServerID:   serverID,
+		ServerName: ev.ServerName,
+		EventType:  ev.SubType,
+		Player:     ev.Player,
+		// 事件发生时间：原始 timestamp（秒级）；后端收到时间：WS 读取时刻。
+		OccurredAt: time.Unix(ev.Timestamp, 0).UTC(),
+		ReceivedAt: receivedAt.UTC(),
+		Message:    ev.Message,
+		RawMessage: ev.RawMessage,
+		MessageID:  ev.MessageID,
+		Command:    ev.Command,
 	}
 
 	doc := &repository.GameEventDoc{
-		EventType:  ev.SubType,
-		ServerName: ev.ServerName,
-		ServerID:   serverID,
+		EventType:  view.EventType,
+		ServerName: view.ServerName,
+		ServerID:   view.ServerID,
 		Player: repository.GameEventPlayer{
-			UUID:     ev.Player.UUID,
-			Nickname: ev.Player.Nickname,
-			IsOp:     ev.Player.IsOp,
+			UUID:     view.Player.UUID,
+			Nickname: view.Player.Nickname,
+			IsOp:     view.Player.IsOp,
 		},
-		// 事件发生时间：原始 timestamp（秒级）→ UTC ISO8601。
-		OccurredAt: time.Unix(ev.Timestamp, 0).UTC().Format(time.RFC3339Nano),
-		// 后端收到时间：WS 读取时刻（已是 UTC）。
-		ReceivedAt: receivedAt.UTC().Format(time.RFC3339Nano),
-		Data:       buildGameEventData(ev),
+		OccurredAt: view.OccurredAt.Format(time.RFC3339Nano),
+		ReceivedAt: view.ReceivedAt.Format(time.RFC3339Nano),
+		Data:       buildGameEventData(view),
 	}
 
 	if err := s.store.InsertGameEvent(ctx, doc); err != nil {
-		return Wrap(ErrInternal, err, "写入游戏事件失败")
+		return nil, Wrap(ErrInternal, err, "写入游戏事件失败")
 	}
-	return nil
+	return view, nil
 }
 
 // buildGameEventData 按事件类型组装 data 子文档：
 //   - join/quit: {}（原始事件不携带额外内容）
 //   - chat:     {message, raw_message, message_id}
 //   - command:  {command, raw_message, message_id}（raw_message 为 Java 对象 toString，仅留存）
-func buildGameEventData(ev *protocol.GameEventPayload) bson.M {
-	switch ev.SubType {
+func buildGameEventData(v *GameEventView) bson.M {
+	switch v.EventType {
 	case "player_join", "player_quit":
 		return bson.M{}
 	case "player_chat":
 		return bson.M{
-			"message":     ev.Message,
-			"raw_message": ev.RawMessage,
-			"message_id":  ev.MessageID,
+			"message":     v.Message,
+			"raw_message": v.RawMessage,
+			"message_id":  v.MessageID,
 		}
 	case "player_command":
 		return bson.M{
-			"command":     ev.Command,
-			"raw_message": ev.RawMessage,
-			"message_id":  ev.MessageID,
+			"command":     v.Command,
+			"raw_message": v.RawMessage,
+			"message_id":  v.MessageID,
 		}
 	}
 	return bson.M{}

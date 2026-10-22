@@ -149,21 +149,43 @@ func (s *GameServerService) Create(ctx context.Context, actorKey, code, name, de
 	return rec, raw, nil
 }
 
-// ResolveServerBySecret 使用 MC 服务器持有的原始 API Secret 解析出其 game_servers.id，
-// 供 /api/v1/game-servers/ws 接入鉴权。计算 SHA256(raw) 后按 api_secret_hash 查启用中的服务器；
+// ResolveServerBySecret 使用 MC 服务器持有的原始 API Secret 解析出其 game_servers.id 与 code，
+// 供 /api/v1/game-servers/ws 接入鉴权（id 用于业务归属，code 用于 Hub 连接索引）。
+// 计算 SHA256(raw) 后按 api_secret_hash 查启用中的服务器；
 // 未命中（secret 错误 / 不存在 / 已停用）返回 ErrServerNotFound，DB 错误包裹为 ErrInternal。
 // 与登录接口一致：调用方应统一将错误映射为 401，不向客户端区分具体成因。
-func (s *GameServerService) ResolveServerBySecret(ctx context.Context, rawSecret string) (int64, error) {
+func (s *GameServerService) ResolveServerBySecret(ctx context.Context, rawSecret string) (serverID int64, serverCode string, err error) {
 	sum := sha256.Sum256([]byte(rawSecret))
 	hash := hex.EncodeToString(sum[:])
 	rec, err := s.store.GetGameServerBySecretHash(ctx, hash)
 	if err != nil {
 		if errors.Is(err, repository.ErrServerNotFound) {
-			return 0, Wrap(ErrServerNotFound, err, "解析游戏服务器凭证失败")
+			return 0, "", Wrap(ErrServerNotFound, err, "解析游戏服务器凭证失败")
 		}
-		return 0, Wrap(ErrInternal, err, "解析游戏服务器凭证失败")
+		return 0, "", Wrap(ErrInternal, err, "解析游戏服务器凭证失败")
 	}
-	return rec.ID, nil
+	return rec.ID, rec.Code, nil
+}
+
+// ResolveSubscribableServer 以「可订阅」语义解析 Web 端 WS 订阅目标：
+// code 格式非法 → ErrServerCodeInvalid；不存在 → ErrServerNotFound；已停用 → ErrServerDisabled。
+// 不做读接口限流：WebSocket 握手限流由 transport 层按 user_id / IP 维度单独计数（见 ws_web.go），
+// 若复用 GetByCode 会把握手流量计入公开读接口的配额，影响普通 HTTP 查询。
+func (s *GameServerService) ResolveSubscribableServer(ctx context.Context, code string) (*repository.GameServerRecord, error) {
+	if !validateServerCode(code) {
+		return nil, ErrServerCodeInvalid
+	}
+	rec, err := s.store.GetGameServerByCode(ctx, code)
+	if err != nil {
+		if errors.Is(err, repository.ErrServerNotFound) {
+			return nil, Wrap(ErrServerNotFound, err, "查询游戏服务器失败")
+		}
+		return nil, Wrap(ErrInternal, err, "查询游戏服务器失败")
+	}
+	if rec.Status != 1 {
+		return nil, Wrap(ErrServerDisabled, nil, "服务器已停用，拒绝订阅")
+	}
+	return rec, nil
 }
 
 // List 分页列出游戏服务器。statusFilter 为 nil 时不过滤。actorKey 取客户端 IP。

@@ -161,3 +161,25 @@ ws://<host>/api/v1/game-servers/ws?token=<创建或轮换时下发的原始 API 
 - 不再需要 `client_id`；服务器身份由服务端根据 secret 判定。
 - secret 错误 / 服务器被停用 → 握手阶段直接 `401`，客户端应视为配置错误并停止重试风暴（建议退避）。
 - 轮换 secret 后旧 secret 立即失效，需用新 secret 重连。
+
+---
+
+## 9. 后续调整：连接索引键改为 `server_code`（WebSocket 抽象改造同步）
+
+后续「WebSocket Client 抽象 + 前端事件推送」改造对本文方案做了两处调整，其余鉴权流程不变：
+
+1. **Hub 连接索引键由 `game_servers.id` 改为 `server_code`**。
+   原因：三类接入端需要各自稳定的身份键，且 Web 端按 `server_code` 订阅；同一台服务器的重连仍表现为「同键重复连接 → 踢旧留新」。
+2. **业务归属仍使用 `game_servers.id`**。
+   `task.ClientID`（事件落库时的服务器身份）保持为 `id` 的十进制字符串，与事件存储/查询口径一致；
+   连接索引键（`server_code`）与业务身份（`server_id`）不可混用。
+
+接口签名相应调整为：
+
+```go
+// ResolveServerBySecret 返回 id 与 code：id 用于业务归属，code 用于连接索引。
+func (s *GameServerService) ResolveServerBySecret(ctx context.Context, rawSecret string) (serverID int64, serverCode string, err error)
+```
+
+- `ServeGameServerWS` 的鉴权顺序、统一 `401` 策略、停用服务器不可接入等规则**保持原样**。
+- `SendToClient(clientID)` 的查找顺序为 adapter 的 `client_id` → `server_code`，Adapter 指令回传语义不变。

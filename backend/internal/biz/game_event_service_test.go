@@ -57,7 +57,7 @@ func TestGameEventService_Ingest_OK(t *testing.T) {
 			p.Command = "gamemode creative"
 
 			recv := time.Date(2026, 10, 19, 7, 30, 25, 125000000, time.UTC)
-			if err := svc.Ingest(context.Background(), 7, recv, p); err != nil {
+			if _, err := svc.Ingest(context.Background(), 7, recv, p); err != nil {
 				t.Fatalf("Ingest 不应返回错误: %v", err)
 			}
 			if len(store.inserted) != 1 {
@@ -100,7 +100,7 @@ func TestGameEventService_Ingest_OK(t *testing.T) {
 func TestGameEventService_Ingest_UnknownSubType(t *testing.T) {
 	store := &fakeGameEventStore{}
 	svc := NewGameEventService(store)
-	err := svc.Ingest(context.Background(), 1, time.Now(), baseGameEventPayload("player_explode"))
+	_, err := svc.Ingest(context.Background(), 1, time.Now(), baseGameEventPayload("player_explode"))
 	if !errors.Is(err, ErrInvalidParam) {
 		t.Fatalf("期望 ErrInvalidParam, 实际 %v", err)
 	}
@@ -111,7 +111,7 @@ func TestGameEventService_Ingest_UnknownSubType(t *testing.T) {
 
 func TestGameEventService_Ingest_Nil(t *testing.T) {
 	svc := NewGameEventService(&fakeGameEventStore{})
-	if !errors.Is(svc.Ingest(context.Background(), 1, time.Now(), nil), ErrInvalidParam) {
+	if _, err := svc.Ingest(context.Background(), 1, time.Now(), nil); !errors.Is(err, ErrInvalidParam) {
 		t.Fatal("nil 事件应返回 ErrInvalidParam")
 	}
 }
@@ -119,7 +119,7 @@ func TestGameEventService_Ingest_Nil(t *testing.T) {
 func TestGameEventService_Ingest_StoreError(t *testing.T) {
 	store := &fakeGameEventStore{err: errors.New("mongo down")}
 	svc := NewGameEventService(store)
-	err := svc.Ingest(context.Background(), 1, time.Now(), baseGameEventPayload("player_join"))
+	_, err := svc.Ingest(context.Background(), 1, time.Now(), baseGameEventPayload("player_join"))
 	// 写入失败必须包裹为 ErrInternal 且保留根因（供日志输出完整链）。
 	if !errors.Is(err, ErrInternal) {
 		t.Fatalf("写入失败应包裹为 ErrInternal, 实际 %v", err)
