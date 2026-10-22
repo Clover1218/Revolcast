@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const serverURL = "ws://127.0.0.1:8080/ws"
+const serverURL = "ws://127.0.0.1:8080/api/v1/adapter/ws"
 
 // WSClient 封装与 Backend 的 WebSocket 连接（含重连）。
 type WSClient struct {

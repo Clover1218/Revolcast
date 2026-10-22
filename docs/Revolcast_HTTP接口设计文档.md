@@ -63,6 +63,12 @@
 | 账号登出 | `POST` | `/api/v1/auth/logout` | 读取会话 Cookie、按 Token 撤销 `web_sessions` 当前会话（`revoked_at`）并清除本地 Cookie |
 | 网站赎回 QQ 绑定码 | `POST` | `/api/v1/user/bind-QQ` | 已登录用户提交 QQ 机器人下发的绑定码，原子消费 `qq_bind_codes` 并写入 `qq_bindings`（BIZ-006） |
 | 网站解绑 QQ | `POST` | `/api/v1/user/unbind-QQ` | 已登录用户解绑当前 QQ（`qq_bindings.status` 1→0、记录 `unbound_at`），仅校验会话（BIZ-007） |
+| 创建游戏服务器 | `POST` | `/api/v1/game-servers` | 创建游戏服务器并签发一次性 API Secret（管理接口，当前暂不鉴权） |
+| 游戏服务器列表 | `GET` | `/api/v1/game-servers` | 公开分页列出游戏服务器（可按 status 过滤） |
+| 游戏服务器详情 | `GET` | `/api/v1/game-servers/{code}` | 公开按 code 查询单个服务器（**不含** `api_secret_hash`） |
+| 更新游戏服务器 | `PATCH` | `/api/v1/game-servers/{code}` | 部分更新 name/description/status（code 与密钥不可改；管理接口，当前暂不鉴权） |
+| 禁用游戏服务器 | `DELETE` | `/api/v1/game-servers/{code}` | 软禁用（status 1→0），保留审计与 FK 引用（管理接口，当前暂不鉴权） |
+| 轮换服务器密钥 | `POST` | `/api/v1/game-servers/{code}/rotate-secret` | 轮换 API Secret，返回一次性新 secret（管理接口，当前暂不鉴权） |
 
 > `check-name`、`register`、`login` 为**未认证**接口（注册/查重发生在登录之前），限流 `subject` 取客户端 IP，而非用户身份；`bind-QQ`、`unbind-QQ` 为**已认证**接口，需携带 `revolcast_session` Cookie，限流 `subject` 取登录用户 `user_id`。
 
@@ -492,6 +498,8 @@ check-name、register、login 均为未认证接口，限流 `subject` 默认取
 | login | `revolcast:ratelimit:auth:login:{ip}`、`revolcast:ratelimit:auth:login:{username}` | 5 分钟 | 5 次 | 客户端 IP + username（双重，任一命中即限流） |
 | bind-QQ | `revolcast:ratelimit:user:bind_qq:{user_id}` | 5 分钟 | 5 次 | 登录用户 `user_id`（已认证接口，见 §7） |
 | unbind-QQ | `revolcast:ratelimit:user:unbind_qq:{user_id}` | 5 分钟 | 5 次 | 登录用户 `user_id`（已认证接口，见 §8） |
+| game-servers 管理 | `revolcast:ratelimit:server:manage:{ip}` | 5 分钟 | 20 次 | 客户端 IP（创建/更新/禁用/轮换，当前暂不鉴权，见 §12） |
+| game-servers 读 | `revolcast:ratelimit:server:read:{ip}` | 5 分钟 | 60 次 | 客户端 IP（列表/详情，公开，见 §12） |
 
 > 限流为短期防刷保护，Redis 数据可重建；业务唯一性/正确性仍由 PostgreSQL 约束保证（见 §4.4）。
 
@@ -510,7 +518,8 @@ HTTP 接口的 `code` 与 HTTP 状态码对齐，错误类别与《WebSocket 消
 | `200` | 200 | 成功 | 正常返回 |
 | `400` | 400 | 参数校验失败 | 缺字段、`username`/`password` 长度或格式不符；bind-QQ 的 `bind_code` 缺失/长度不为 8 或绑定码无效（不存在 / 已使用 / 已过期）亦返回 400 |
 | `401` | 401 | 未授权 / 凭证错误 | 登录用户名不存在、密码错误或账号不可用（统一返回，防枚举）；登出/bind-QQ/unbind-QQ 未携带有效会话亦返回 401 |
-| `409` | 409 | 资源冲突（唯一约束 / 状态冲突） | 注册时用户名已存在（应用层预检命中或数据库唯一约束兜底）；bind-QQ 时该账号已绑定其他 QQ（`user already bound`），或该 QQ 已被其他账号绑定（`qq already bound`）；unbind-QQ 时该账号当前无有效 QQ 绑定（`not bound`） |
+| `409` | 409 | 资源冲突（唯一约束 / 状态冲突） | 注册时用户名已存在（应用层预检命中或数据库唯一约束兜底）；bind-QQ 时该账号已绑定其他 QQ（`user already bound`），或该 QQ 已被其他账号绑定（`qq already bound`）；unbind-QQ 时该账号当前无有效 QQ 绑定（`not bound`）；创建游戏服务器时 code 已被占用（`server code taken`，见 §12） |
+| `404` | 404 | 资源不存在 | 按 code 查询/操作游戏服务器但不存在（`server not found`，见 §12） |
 | `429` | 429 | 触发限流 | 命中 Redis 限流计数（`RATE_LIMITED` 类别） |
 | `500` | 500 | 服务端内部错误 | 数据库写入/查询失败等（`INTERNAL_ERROR` 类别） |
 
@@ -527,3 +536,141 @@ HTTP 接口的 `code` 与 HTTP 状态码对齐，错误类别与《WebSocket 消
 5. **唯一性兜底** — 用户名校验与注册都不能只靠应用层先查再写；必须以数据库唯一索引为权威。
 6. **会话凭证安全** — 原始 Token 仅经 HttpOnly Cookie（`revolcast_session`）一次性下发，数据库只存其 SHA-256 哈希（`web_sessions.token_hash`）；Cookie 设 `HttpOnly`（防 XSS 窃取）、`SameSite=Lax`，生产环境追加 `Secure`（仅 HTTPS）；前端不可在 JS 中读取或持久化 Token。
 7. **防用户名枚举** — 登录失败统一返回 `401`，不在响应中区分"用户不存在"与"密码错误"，也不暴露账号是否被禁用。
+
+---
+
+## 12. game_servers 接口（游戏服务器管理）
+
+**基础前缀：** `/api/v1/game-servers`  
+**资源标识：** 路径统一使用 `code`（数据库稳定标识，对应表设计文档 §3.4），不使用可变的 `id` 或 `name`。  
+**绝不返回字段：** 任何响应都不包含 `api_secret_hash`。  
+**鉴权现状：** 读接口（列表 / 详情）**完全公开**；管理接口（创建 / 更新 / 禁用 / 轮换密钥）**当前暂不鉴权**（角色系统待引入，代码中以 `TODO(role-system)` 标注）。上线前必须由角色系统接入管理员判定，否则不应在公网暴露。  
+**数据依赖：** PostgreSQL `game_servers` 表（详见《Revolcast 数据库表设计文档 v1.1》§3.4）；Redis 限流键见 §9。
+
+### 12.1 `GameServerView` 结构
+
+所有成功响应中服务器的统一视图（无 secret）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `int64` | 服务器 ID |
+| `code` | `string` | 服务器标识（路径使用此值） |
+| `name` | `string` | 展示名称 |
+| `description` | `string` \| `null` | 描述，无则 `null` |
+| `status` | `int` | `1`=启用，`0`=停用 |
+| `created_at` | `string`（UTC） | RFC3339 |
+| `updated_at` | `string`（UTC） | RFC3339 |
+
+### 12.2 `POST /api/v1/game-servers` — 创建
+
+**业务目标：** 创建一条游戏服务器记录，并生成一次性 API Secret。
+
+**请求体（JSON）：**
+
+```json
+{ "code": "survival-01", "name": "生存服", "description": "第一生存服" }
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `code` | `string` | 是 | 服务器标识；须匹配 `^[a-z0-9-]+$`，长度 1..64（与数据库 CHECK 约束一致） |
+| `name` | `string` | 是 | 展示名称；非空，长度 1..128 |
+| `description` | `string` | 否 | 描述；空字符串等价于无描述（存 NULL） |
+
+**主流程：**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **参数校验** — `code` 格式/长度、`name` 非空/长度；否则 `400`（`server code invalid` / `server name invalid`） |
+| 02 | **限流检查** — 命中 `revolcast:ratelimit:server:manage:{ip}`（5 分钟 20 次）则返回 `429` |
+| 03 | **生成 Secret** — `crypto/rand` 32 字节随机 → hex 64 字符原始串；计算 `SHA256(原始串)` 作为 `api_secret_hash` |
+| 04 | **持久化** — `INSERT INTO game_servers (code, name, description, api_secret_hash, status=1)`；唯一约束 `game_servers_code_key` 冲突回滚并返回 `409`（`server code taken`） |
+| 05 | **返回结果** — `200`，`data` 含 `GameServerView` + 一次性原始 `secret` |
+
+**响应（成功 `200`）：**
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "id": 1, "code": "survival-01", "name": "生存服",
+    "description": "第一生存服", "status": 1,
+    "created_at": "2026-10-22T07:00:00Z", "updated_at": "2026-10-22T07:00:00Z",
+    "secret": "<一次性原始密钥>"
+  }
+}
+```
+
+> 原始 `secret` 仅在此响应出现一次；库只存其 `SHA256` 哈希，不写日志、不回传哈希以外信息。
+
+**异常情况：** `400`（参数非法）/ `409`（code 冲突）/ `429`（限流）/ `500`（内部错误）。
+
+### 12.3 `GET /api/v1/game-servers` — 列表（公开）
+
+**业务目标：** 分页列出游戏服务器，无需登录。
+
+**查询参数（均可选）：**
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `status` | `int` | `0` 或 `1`，过滤状态；缺省返回全部 |
+| `limit` | `int` | 每页条数，默认 20，封顶 100 |
+| `offset` | `int` | 偏移，默认 0 |
+
+**响应（成功 `200`）：** `data` 为 `GameServerView` 数组（不含 `secret`）。  
+**异常情况：** `400`（参数非法）/ `429`（限流）/ `500`。
+
+### 12.4 `GET /api/v1/game-servers/{code}` — 详情（公开）
+
+**业务目标：** 按 `code` 查询单个服务器（公开）。
+
+**响应（成功 `200`）：** 单个 `GameServerView`。  
+**异常情况：** `400`（code 格式非法，直接拦截不查库）/ `404`（不存在，`server not found`）/ `429` / `500`。
+
+### 12.5 `PATCH /api/v1/game-servers/{code}` — 更新（暂不鉴权）
+
+**业务目标：** 部分更新 `name` / `description` / `status`；`code` 与密钥不可经此修改。
+
+**请求体（JSON，字段均可选；指针区分「未提供」与「显式置空」）：**
+
+```json
+{ "name": "新名字", "description": "", "status": 0 }
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | `string` | 否 | 非空，长度 1..128 |
+| `description` | `string` \| `null` | 否 | 非 null 即更新（空字符串 → NULL） |
+| `status` | `int` | 否 | 仅 `0` / `1` |
+
+**主流程：** 参数校验 → 限流（manage）→ 动态拼装 `UPDATE SET`（`updated_at=now()`）→ 目标不存在返回 `404`。全部字段均未提供时视为空更新，幂等返回当前记录。  
+**响应（成功 `200`）：** 更新后的 `GameServerView`。  
+**异常情况：** `400`（参数/`status` 非法）/ `404`（不存在）/ `429` / `500`。
+
+### 12.6 `DELETE /api/v1/game-servers/{code}` — 禁用（暂不鉴权）
+
+**业务目标：** 软禁用服务器（`status 1→0`），保留历史行与所有外键引用（`server_game_bindings` / `server_groups` / `game_bind_codes`），符合数据库文档 §7.10「优先禁用、保留审计」。
+
+**主流程：** 限流（manage）→ `UPDATE ... SET status=0, updated_at=now() WHERE code=$1 AND status=1`；0 行时回查区分「不存在（404）」与「已禁用（幂等成功，返回当前记录）」。  
+**响应（成功 `200`）：** 当前 `GameServerView`（已禁用）。  
+**异常情况：** `404`（不存在）/ `429` / `500`。
+
+### 12.7 `POST /api/v1/game-servers/{code}/rotate-secret` — 轮换密钥（暂不鉴权）
+
+**业务目标：** 生成新的一次性 API Secret 并更新 `api_secret_hash`；旧 secret 立即失效。
+
+**响应（成功 `200`）：** `data` 含 `GameServerView` + 一次性新 `secret`。  
+**异常情况：** `404`（不存在）/ `429` / `500`。
+
+### 12.8 Secret 安全约束
+
+- 库仅存 `SHA256(secret)`；原始 secret 仅在创建/轮换响应中出现一次，**不写日志、不回传哈希以外信息**。
+- 校验方式（与数据库文档 §3.4 一致）：对端在 TLS 通道出示 secret，服务端比较 `SHA256(presented) == api_secret_hash`（满足「Secret 仅用于校验可保存安全哈希」）。
+- 后续若需 HMAC 签名（`timestamp + nonce`）防重放，服务端须以原始密钥计算签名，则需改为可安全取回的密钥管理（KMS / 信封加密）并新增密文列——属独立改造，不在本接口范围。
+- 在线人数、MOTD、心跳等动态状态不在此表，由 Redis / WS 承载，不属本 CRUD。
+
+### 12.9 后续依赖（不在本接口范围）
+
+- **WS 鉴权升级（已落地）：** `/api/v1/game-servers/ws` 不再使用全局 `cfg.WS.Token`，改为「对 `query.token`（原始 API Secret）取 `SHA256` 后按 `api_secret_hash` 查 `game_servers` + 要求 `status=1`」，命中则 `clientID = game_servers.id`；不再接受自声明的 `client_id`。详见《Websocket消息结构设计文档》「WS 连接与接入端身份」与《WS游戏服务器鉴权改造方案》。
+- **角色系统：** 管理接口接入管理员判定后，移除 `TODO(role-system)` 并在 transport 层强制鉴权。

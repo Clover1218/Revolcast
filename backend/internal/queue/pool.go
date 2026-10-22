@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"revolcast-backend/internal/biz"
 	"go.uber.org/zap"
+	"revolcast-backend/internal/biz"
 )
 
 var (
@@ -165,7 +165,7 @@ func (p *Pool) execute(parent context.Context, lg *zap.Logger, t Task) {
 	start := time.Now()
 	lg = lg.With(
 		zap.String("trace_id", t.TraceID),
-		zap.String("bot_id", t.BotID),
+		zap.String("client_id", t.ClientID),
 		zap.String("msg_type", t.Type),
 		zap.Duration("queue_wait", start.Sub(t.ReceivedAt)),
 	)

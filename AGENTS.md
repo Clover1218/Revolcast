@@ -20,6 +20,7 @@ AI 在参与项目开发时，应优先理解现有架构和设计文档，再�
 | `docs/Revolcast_数据库表设计文档_v1.1.md` | 了解数据库表结构、字段定义、约束及数据关系 |
 | `docs/Revolcast业务流程设计文档.md` | 了解业务功能、执行流程、业务规则及模块职责 |
 | `docs/Websocket消息结构设计文档.md` | 了解统一消息协议、Envelope、消息类型、Payload 及消息交互方向 |
+| `docs/Revolcast_HTTP接口设计文档.md` | 了解后端 HTTP REST 接口契约（路径、请求/响应字段、限流、错误码）；含 game_servers 增删改查（§12）及通用响应封装（§1） |
 
 ### 文档使用规则
 

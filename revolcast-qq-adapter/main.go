@@ -37,7 +37,7 @@ func main() {
 	defer cancel()
 
 	// 连接 Backend WS（与 Backend 的 ws 配置对应）。
-	wsURL := fmt.Sprintf("ws://%s/ws?token=%s&bot_id=%s", cfg.WS.Addr, cfg.WS.Token, cfg.WS.BotID)
+	wsURL := fmt.Sprintf("ws://%s/api/v1/adapter/ws?token=%s&client_id=%s", cfg.WS.Addr, cfg.WS.Token, cfg.WS.BotID)
 	client := transport.NewWSClient(ctx, wsURL, log)
 	go client.Start()
 

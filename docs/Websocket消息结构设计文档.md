@@ -26,6 +26,42 @@ Type字段基本格式如下：
  └──────────────── event / command / result / request / response / hello / ping / pong
 ```
 
+## WS 连接与接入端身份（补充约定）
+
+除统一的消息协议外，接入端与服务端的 WS 连接本身也约定如下（代码见 `backend/internal/transport/ws_server.go`）。
+
+### 接入路由
+
+| 路由 | client_type | 鉴权方式 | 适用接入端 |
+| :--- | :--- | :--- | :--- |
+| `/api/v1/adapter/ws` | `adapter` | 共享密钥（配置 `ws.token`） | QQ 机器人适配器（Revolcast-qq-adapter） |
+| `/api/v1/game-servers/ws` | `mc_server` | per-server API Secret（`game_servers`） | Minecraft 服务器及未来服务端类接入端 |
+
+- **client_type 由路由决定，客户端不可自行声明**，从而避免冒用其他接入端类型。
+- `wss`（TLS）由部署层 / 后续迭代处理（如 nginx 统一 TLS 终止），不在应用层强制。
+
+### 连接查询参数
+
+| 参数 | 适用路由 | 必填 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `token` | 两者 | 是 | adapter：共享密钥 `ws.token`；game-servers：创建/轮换时一次性下发的**原始 API Secret** |
+| `client_id` | 仅 `/api/v1/adapter/ws` | 是 | 全局唯一身份 ID（如 `revolcast-qq-bot`），用于回传路由与去重。`/api/v1/game-servers/ws` **不接受**该参数，身份由 secret 派生 |
+
+### `/api/v1/game-servers/ws` 接入鉴权
+
+1. 取 `query.token`（原始 API Secret），缺失即 `401`。
+2. 服务端计算 `SHA256(token)`，按 `api_secret_hash` 查 `game_servers`（**要求 `status = 1`**）。
+   - 命中 → `clientID = game_servers.id`（十进制字符串），`client_type = mc_server`。
+   - secret 错误 / 服务器不存在 / 已停用（`status = 0`）/ DB 异常 → 一律 `401`，不向客户端区分成因（避免枚举与信息泄露），根因仅进内部日志。
+3. 身份由 secret 派生，客户端无法自报或冒用其他服务器；`client_id` 参数被忽略。
+4. 服务器被停用或轮换 secret 后，旧连接**不会被立即断开**（下次重连才校验），如需强制下线见后续迭代。
+
+### 身份与连接约束
+
+- **单身份单连接**：同一 `client_id` 同时只允许一个有效连接。出现重复连接时，服务端**踢掉旧连接**由新连接接管；旧连接随后自动注销，不会误删新映射。对 `mc_server` 而言同一台服务器重连即触发踢旧，天然避免重复在线。
+- **回传路由**：业务层通过 `client_id` 调用 `SendToClient` 回传指令；客户端不在线或发送队列满时返回失败，调用方（Worker）不因此阻塞。`mc_server` 场景下 `client_id` 即 `game_servers.id`，可直接据此查询服务器信息。
+- **凭证与身份分离**：`adapter` 仍为共享 Token + 自声明 `client_id`；`mc_server` 已改为 per-server 独立凭证（secret 派生身份）。后续引入权限模型时，应在连接建立处补充服务器级权限校验（如服务器是否被允许承载某玩家）。
+
 ## 2. Adapter → Backend
 
 ### event.qq.message.group/event.qq.message.private 收到 QQ 群聊/私聊 消息 

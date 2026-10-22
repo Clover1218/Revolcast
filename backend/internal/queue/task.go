@@ -11,7 +11,7 @@ import (
 // 这样 queue 包对业务零耦合，也方便后续把某个 Type 单独分流到不同 Worker 池。
 type Task struct {
 	TraceID    string          // 链路追踪 ID，贯穿日志与 Action 回传闭环
-	BotID      string          // 来源机器人，用于把 Action 回传给正确的 Adapter
+	ClientID   string          // 来源客户端身份 ID，用于把 Action / 指令回传给正确的接入端
 	Type       string          // envelope.type，例如 "event.message.group"
 	Payload    json.RawMessage // envelope.payload 原始字节
 	ReceivedAt time.Time       // 入队时间，用于统计排队延迟

@@ -38,7 +38,6 @@ func main() {
 	if err != nil {
 		panic("Redis 连接失败" + err.Error())
 	}
-	_ = MongoDB // 当前 BIZ-001 未使用 MongoDB；保留连接以备后续业务
 	// 初始化日志
 	log, err := logger.New(&cfg.Log)
 	if err != nil {
@@ -56,7 +55,16 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 业务队列 + Handler。Hub 负责按 bot_id 把指令回传给对应 Adapter。
+	// game_events 集合索引：服务启动时幂等创建（server_id / event_type / server_id+occurred_at）。
+	// 失败非致命（索引也可由迁移脚本/DBA 单独维护），仅告警不阻塞启动。
+	gameEventRepo := repository.NewGameEventRepo(MongoDB)
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := gameEventRepo.EnsureIndexes(idxCtx); err != nil {
+		baseLogger.Error("创建 game_events 索引失败（非致命，继续启动）", zap.Error(err))
+	}
+	idxCancel()
+
+	// 业务队列 + Handler。Hub 按 client_id 把指令回传给对应接入端（Adapter / MC 等）。
 	hub := transport.NewHub(baseLogger)
 	pgRepo := repository.NewQQBindRepo(PostgreSQL)
 	redisRepo := repository.NewRedisRepo(Redis)
@@ -65,6 +73,8 @@ func main() {
 		RateLimitWindow: 5 * time.Minute,
 		RateLimitMax:    3,
 	})
+	// 游戏事件入库业务（game_events）：消费 WS 上行事件并写入 MongoDB 审计日志。
+	gameEventSvc := biz.NewGameEventService(gameEventRepo)
 
 	// HTTP 鉴权接口（BIZ-002 / BIZ-003 / BIZ-004）：复用同一份 DB/Redis/Logger。
 	userRepo := repository.NewUserRepo(PostgreSQL)
@@ -80,19 +90,33 @@ func main() {
 		QueueSize:      cfg.Queue.QueueSize,
 		EnqueueTimeout: time.Duration(cfg.Queue.EnqueueTimeout) * time.Millisecond,
 		TaskTimeout:    time.Duration(cfg.Queue.TaskTimeout) * time.Millisecond,
-	}, transport.NewBizHandler(hub, baseLogger, bindSvc), baseLogger)
+	}, transport.NewBizHandler(hub, baseLogger, bindSvc, gameEventSvc), baseLogger)
 	hub.SetPool(pool)
 	go hub.Run()
 
-	// 同一 Server 同时承载 WS（/ws）与 HTTP API（/api/v1/*），复用监听与优雅关闭。
+	// 游戏服务器业务（game_servers）：WS 接入鉴权与 HTTP 管理接口共用同一 service。
+	// 管理接口当前不鉴权（角色系统待引入，见 biz.GameServerService 的 TODO）。
+	gameServerRepo := repository.NewGameServerRepo(PostgreSQL)
+	gameServerSvc := biz.NewGameServerService(gameServerRepo, redisRepo, biz.GameServerConfig{})
+
+	// 同一 Server 同时承载 WS（/api/v1/adapter/ws、/api/v1/game-servers/ws）与 HTTP API（/api/v1/*），复用监听与优雅关闭。
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", transport.ServeWS(hub, &cfg.WS, baseLogger))
+	mux.HandleFunc("/api/v1/adapter/ws", transport.ServeWS(hub, &cfg.WS, baseLogger, "adapter"))
+	// 游戏服务器接入：以 per-server API Secret 鉴权，clientID = game_servers.id（见 ServeGameServerWS）。
+	mux.HandleFunc("/api/v1/game-servers/ws", transport.ServeGameServerWS(hub, gameServerSvc, baseLogger))
 	mux.Handle("/api/v1/auth/check-name", transport.CORSMiddleware(http.HandlerFunc(authHandler.CheckName)))
 	mux.Handle("/api/v1/auth/register", transport.CORSMiddleware(http.HandlerFunc(authHandler.Register)))
 	mux.Handle("/api/v1/auth/login", transport.CORSMiddleware(http.HandlerFunc(authHandler.Login)))
 	mux.Handle("/api/v1/auth/logout", transport.CORSMiddleware(http.HandlerFunc(authHandler.Logout)))
 	mux.Handle("/api/v1/user/bind-QQ", transport.CORSMiddleware(http.HandlerFunc(userHandler.BindQQ)))
 	mux.Handle("/api/v1/user/unbind-QQ", transport.CORSMiddleware(http.HandlerFunc(userHandler.UnbindQQ)))
+
+	// HTTP 游戏服务器管理接口（game_servers 增删改查，详见《Revolcast HTTP 接口设计文档》）。
+	gameServerHandler := transport.NewGameServerHandler(gameServerSvc, baseLogger)
+	mux.Handle("/api/v1/game-servers", transport.CORSMiddleware(http.HandlerFunc(gameServerHandler.Collection)))
+	mux.Handle("/api/v1/game-servers/{code}", transport.CORSMiddleware(http.HandlerFunc(gameServerHandler.Item)))
+	mux.Handle("/api/v1/game-servers/{code}/rotate-secret", transport.CORSMiddleware(http.HandlerFunc(gameServerHandler.RotateSecret)))
+
 	srv := &http.Server{
 		Addr:         cfg.WS.Addr,
 		Handler:      mux,

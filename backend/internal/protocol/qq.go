@@ -98,6 +98,13 @@ const (
 	ErrorCodeQQAlreadyBound = "QQ_ALREADY_BOUND"
 	ErrorCodeRateLimited    = "RATE_LIMITED"
 	ErrorCodeInternal       = "INTERNAL_ERROR"
+
+	// game_servers 相关错误码（HTTP 接口设计文档）：必须与 internal/biz/errors.go 中
+	// errorMeta 的 WSCode 保持一致（后者为对外错误码与文案的唯一映射源）。
+	ErrorCodeServerCodeInvalid = "SERVER_CODE_INVALID"
+	ErrorCodeServerNameInvalid = "SERVER_NAME_INVALID"
+	ErrorCodeServerCodeTaken   = "SERVER_CODE_TAKEN"
+	ErrorCodeServerNotFound    = "SERVER_NOT_FOUND"
 )
 
 // NewCommandID 生成 v4 风格 UUID 字符串，用作出站指令的 command_id。

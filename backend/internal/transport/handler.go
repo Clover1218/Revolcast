@@ -26,13 +26,19 @@ type outbound struct {
 
 // NewBizHandler 返回业务处理器，供 queue.Pool 消费 Task。
 // 它解析 payload、按 type 路由到具体业务逻辑，并把指令回传给对应 Adapter。
-func NewBizHandler(hub *Hub, logger *zap.Logger, svc *biz.BindCodeService) queue.Handler {
+// gameEventSvc 负责落库鹊桥上报的游戏事件（player_join/quit/chat/command）。
+func NewBizHandler(hub *Hub, logger *zap.Logger, svc *biz.BindCodeService, gameEventSvc *biz.GameEventService) queue.Handler {
 	return func(ctx context.Context, task queue.Task) error {
 		log := logger.With(
 			zap.String("trace_id", task.TraceID),
-			zap.String("bot_id", task.BotID),
+			zap.String("client_id", task.ClientID),
 			zap.String("msg_type", task.Type),
 		)
+
+		// 游戏服务器（mc_server）上报的事件：直接落库，无回传指令。
+		if isGameEventType(task.Type) {
+			return handleGameEvent(ctx, task, gameEventSvc, log)
+		}
 
 		// 业务分发：按 envelope.type 路由，返回需要下发的指令（可为 nil）。
 		out, err := route(ctx, task, svc, log)
@@ -54,7 +60,7 @@ func NewBizHandler(hub *Hub, logger *zap.Logger, svc *biz.BindCodeService) queue
 		if err != nil {
 			return err
 		}
-		if !hub.SendToBot(task.BotID, respData) {
+		if !hub.SendToClient(task.ClientID, respData) {
 			log.Warn("下发指令失败：Adapter 不在线或发送队列已满")
 		}
 		return nil
@@ -91,7 +97,7 @@ func route(ctx context.Context, task queue.Task, svc *biz.BindCodeService, log *
 		return nil, nil
 	}
 
-	code, berr := svc.GenerateBindCode(ctx, qqUIN, task.BotID, task.TraceID)
+	code, berr := svc.GenerateBindCode(ctx, qqUIN, task.ClientID, task.TraceID)
 
 	// 所有私聊命令路径都向用户回一条私聊消息（成功或友好提示），
 	// 避免用户得到静默无响应。文案不泄露内部错误细节（日志最小化）。
@@ -125,4 +131,43 @@ func mustJSON(v any) json.RawMessage {
 		return nil
 	}
 	return b
+}
+
+// isGameEventType 判断 task.Type 是否为鹊桥游戏事件类型（event.game.*）。
+func isGameEventType(t string) bool {
+	switch t {
+	case protocol.TypeGamePlayerJoin,
+		protocol.TypeGamePlayerQuit,
+		protocol.TypeGamePlayerChat,
+		protocol.TypeGamePlayerCommand:
+		return true
+	}
+	return false
+}
+
+// handleGameEvent 处理鹊桥上报的游戏事件：解析 payload → 从 WS 已鉴权身份取 serverID → 落库。
+// 解析失败或来源 client_id 非 server_id 时记日志并丢弃（不向前抛，避免污染队列指标）。
+// 业务错误（未知 sub_type / Mongo 写入失败）由 biz 内部 Wrap 携带根因，这里记 Warn 日志（含 trace）便于排查。
+func handleGameEvent(ctx context.Context, task queue.Task, svc *biz.GameEventService, log *zap.Logger) error {
+	var payload protocol.GameEventPayload
+	if err := task.Decode(&payload); err != nil {
+		log.Warn("解析游戏事件 payload 失败", zap.Error(err))
+		return nil
+	}
+
+	// server_id 来自 WS 已鉴权身份（clientID = game_servers.id），不从 server_name 反查。
+	serverID, err := strconv.ParseInt(task.ClientID, 10, 64)
+	if err != nil {
+		log.Warn("游戏事件来源 client_id 非 server_id，丢弃",
+			zap.String("client_id", task.ClientID))
+		return nil
+	}
+
+	if err := svc.Ingest(ctx, serverID, task.ReceivedAt, &payload); err != nil {
+		log.Warn("处理游戏事件失败",
+			zap.String("error_code", biz.ResolveErrorMeta(err).WSCode),
+			zap.Error(err))
+		return err
+	}
+	return nil
 }

@@ -41,20 +41,18 @@
 
 ## 鹊桥 → 连接端
 
-### PlayerChatEvent-玩家聊天事件
+### PlayerjoinEvent-玩家加入事件
+#### 原始JSON
 | 字段名 | 数据类型 | 可能的值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | timestamp | int | - | 事件时间戳 |
-| post_type | str | message | 事件类型 |
-| event_name | str | PlayerChatEvent | 事件名 |
+| post_type | str | notice | 事件类型 |
+| event_name | str | PlayerJoinEvent | 事件名 |
 | server_name | str | - | 服务器名称 |
 | server_version | str | - | 服务器版本 |
 | server_type | str | - | 服务器类型 |
-| sub_type | str | player_chat | 事件子类型 |
-| message_id | str | - | 消息 ID |
-| raw_message | str | - | 原始消息内容 |
+| sub_type | str | player_join | 事件子类型 |
 | player | Player | - | 玩家对象 |
-| message | str | - | 消息对象 |
 示例：
 ```json
 {
@@ -82,7 +80,47 @@
   "server_type": "forge"
 }
 ```
+#### 建议转换存入MongoDB格式
+
+> **公共约定（适用于 PlayerJoin / PlayerQuit / PlayerChat / PlayerCommand 全部事件）**
+> - **集合**：统一写入新建集合 `game_events`。⚠️ 注意：与《Revolcast_数据库表设计文档_v1.1.md》§4.1 的 `server_messages`（转发到 Web/QQ 的聊天消息）**不是同一集合**；本集合是原始游戏事件审计日志，不承载转发聊天。
+> - **`event_type`**：取原始 JSON 的 `sub_type` 字符串值，取值 `player_join` / `player_quit` / `player_chat` / `player_command`（**不要用 int**）。
+> - **`server_id`**：`int64`，来自本服务器 WebSocket 连接的**已鉴权身份**（`clientID = game_servers.id`），**不要**由 `server_name` 反查；`server_name` 仅作为展示/自检字段原样存储。
+> - **`player`**：统一保存 `{ uuid, nickname, is_op }` 快照。
+> - **`occurred_at`**：由原始 `timestamp`（秒级 Unix 时间戳）转为 UTC ISO8601；**`received_at`**：后端收到事件时写入的 UTC 时间。
+> - **`_id`**：由 MongoDB 自动生成 `ObjectId`，应用层不赋值（下方示例省略）。
+
+以下值必填:
+| 字段名 | 数据类型 | 说明 |
+| :--- | :--- | :--- |
+| event_type | str | 事件类型，固定为 `player_join` |
+| server_name | str | 服务器名字，原样提取自原始JSON的`server_name`字段（仅展示/自检，不参与 server_id 解析） |
+| server_id | int64 | 此服务器在`game_servers.id`的值，来自 WS 连接已鉴权身份 |
+| player | object | 玩家对象快照 |
+| player.uuid | str | 玩家uuid，提取自原始JSON的`player.uuid` |
+| player.nickname | str | 玩家昵称，提取自原始JSON的`player.nickname` |
+| player.is_op | bool | 玩家是否为管理员，提取自原始JSON的`player.is_op` |
+| occurred_at | str(ISO8601 UTC) | 事件发生时间，由原始JSON的`timestamp`（秒）转换 |
+| received_at | str(ISO8601 UTC) | 后端收到该事件时的时间 |
+| data | object | 事件数据；PlayerJoinEvent 无额外字段，固定为 `{}` |
+
+```json
+{
+  "event_type": "player_join",
+  "server_name": "TestServer",
+  "server_id": 1,
+  "player": {
+    "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509",
+    "nickname": "PlantClover",
+    "is_op": true
+  },
+  "occurred_at": "2026-10-19T07:30:25.000Z",
+  "received_at": "2026-10-19T07:30:25.125Z",
+  "data": {}
+}
+```
 ### PlayerQuitEvent-玩家离开事件
+
 | 字段名 | 数据类型 | 可能的值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | timestamp | int | - | 事件时间戳 |
@@ -120,6 +158,38 @@
   "server_type": "forge"
 }
 ```
+#### 建议转换存入MongoDB格式
+集合 `game_events`（公共约定同上）。必填字段与 PlayerJoinEvent 一致，仅 `event_type="player_quit"`，`data` 固定为 `{}`（离开事件原始 JSON 不携带消息内容）。
+
+| 字段名 | 数据类型 | 说明 |
+| :--- | :--- | :--- |
+| event_type | str | 事件类型，固定为 `player_quit` |
+| server_name | str | 原样提取自原始JSON的`server_name` |
+| server_id | int64 | `game_servers.id`，来自 WS 连接已鉴权身份 |
+| player | object | 玩家对象快照 |
+| player.uuid | str | 提取自`player.uuid` |
+| player.nickname | str | 提取自`player.nickname` |
+| player.is_op | bool | 提取自`player.is_op` |
+| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
+| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| data | object | 固定为 `{}` |
+
+```json
+{
+  "event_type": "player_quit",
+  "server_name": "TestServer",
+  "server_id": 1,
+  "player": {
+    "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509",
+    "nickname": "PlantClover",
+    "is_op": true
+  },
+  "occurred_at": "2026-10-19T07:30:23.000Z",
+  "received_at": "2026-10-19T07:30:23.125Z",
+  "data": {}
+}
+```
+
 ### PlayerChatEvent-玩家聊天事件
 | 字段名 | 数据类型 | 可能的值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -136,7 +206,7 @@
 | message | str | - | 消息对象 |
 ```json
 {
-  "message": "21",
+  "message": "有人吗",
   "player": {
     "nickname": "PlantClover",
     "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509",
@@ -153,7 +223,7 @@
     "z": 12.133213577570155
   },
   "message_id": "",
-  "raw_message": "{\"text\":\"21\"}",
+  "raw_message": "{\"text\":\"有人吗\"}",
   "event_name": "PlayerChatEvent",
   "post_type": "message",
   "sub_type": "player_chat",
@@ -163,7 +233,45 @@
   "server_type": "forge"
 }
 ```
-### PlayerCommandEvent
+#### 建议转换存入MongoDB格式
+集合 `game_events`（公共约定同上）。`event_type="player_chat"`。聊天事件在 `data` 中携带消息内容。
+
+| 字段名 | 数据类型 | 说明 |
+| :--- | :--- | :--- |
+| event_type | str | 事件类型，固定为 `player_chat` |
+| server_name | str | 原样提取自原始JSON的`server_name` |
+| server_id | int64 | `game_servers.id`，来自 WS 连接已鉴权身份 |
+| player | object | 玩家对象快照（uuid / nickname / is_op） |
+| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
+| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| data | object | 聊天数据 |
+| data.message | str | 纯文本消息，提取自原始JSON的`message` |
+| data.raw_message | str | 原始消息（Minecraft 文本组件 JSON 字符串），提取自`raw_message` |
+| data.message_id | str | 消息 ID，提取自`message_id`（样本为空字符串，允许为空） |
+
+```json
+{
+  "event_type": "player_chat",
+  "server_name": "TestServer",
+  "server_id": 1,
+  "player": {
+    "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509",
+    "nickname": "PlantClover",
+    "is_op": true
+  },
+  "occurred_at": "2026-10-19T07:29:37.000Z",
+  "received_at": "2026-10-19T07:29:37.125Z",
+  "data": {
+    "message": "有人吗",
+    "raw_message": "{\"text\":\"有人吗\"}",
+    "message_id": ""
+  }
+}
+```
+
+> 说明：`message` 为已提取的纯文本；`raw_message` 为 Minecraft 文本组件 JSON，便于需要还原颜色/格式时回溯。若后续需要把聊天转发到 Web/QQ，应按《数据库表设计文档》§4.1 另行写入 `server_messages`，本记录仅作原始事件留存。
+
+### PlayerCommandEvent-玩家命令事件
 | 字段名 | 数据类型 | 可能的值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | timestamp | int | - | 事件时间戳 |
@@ -207,6 +315,44 @@
   "server_type": "forge"
 }
 ```
+
+#### 建议转换存入MongoDB格式
+集合 `game_events`（公共约定同上）。`event_type="player_command"`。命令事件在 `data` 中携带命令内容。
+
+| 字段名 | 数据类型 | 说明 |
+| :--- | :--- | :--- |
+| event_type | str | 事件类型，固定为 `player_command` |
+| server_name | str | 原样提取自原始JSON的`server_name` |
+| server_id | int64 | `game_servers.id`，来自 WS 连接已鉴权身份 |
+| player | object | 玩家对象快照（uuid / nickname / is_op） |
+| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
+| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| data | object | 命令数据 |
+| data.command | str | 玩家输入的命令（不含前导 `/`），提取自`command` |
+| data.raw_message | str | 原始消息；⚠️ 本事件中 `raw_message` 为 Java 对象 `toString`（如 `com.mojang.brigadier.context.CommandContextBuilder@...`），通常无业务价值，原样留存以便排查 |
+| data.message_id | str | 消息 ID，提取自`message_id`（样本为空字符串，允许为空） |
+
+```json
+{
+  "event_type": "player_command",
+  "server_name": "TestServer",
+  "server_id": 1,
+  "player": {
+    "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509",
+    "nickname": "PlantClover",
+    "is_op": true
+  },
+  "occurred_at": "2026-10-19T07:33:59.000Z",
+  "received_at": "2026-10-19T07:33:59.125Z",
+  "data": {
+    "command": "gamemode creative",
+    "raw_message": "com.mojang.brigadier.context.CommandContextBuilder@44f89862",
+    "message_id": ""
+  }
+}
+```
+
+> 说明：`command` 是命令审计的核心字段；`raw_message` 在本事件中价值极低，仅作原始留存。建议对 `is_op=true` 玩家的命令做重点审计/检索（结合 `player.is_op`）。
 
 ## 连接端 → 鹊桥
 

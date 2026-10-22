@@ -17,7 +17,7 @@ const (
 type EventPayload struct {
 	// Adapter 填充的连接级上下文（不可被 Raw 覆盖）
 	Kind       string `json:"kind"`        // 粗分类，见上方常量
-	BotID      string `json:"bot_id"`      // 来源 bot，Backend 必须校验与连接一致
+	ClientID   string `json:"client_id"`   // 来源客户端身份 ID，Backend 必须校验与连接一致
 	SelfID     int64  `json:"self_id"`     // 机器人自身 QQ 号（从 OneBot 事件取，没有则填 0）
 	ReceivedAt int64  `json:"received_at"` // Adapter 收到事件的 Unix ms
 

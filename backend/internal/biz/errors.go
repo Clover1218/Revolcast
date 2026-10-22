@@ -34,6 +34,15 @@ var (
 	ErrAccountDisabled = errors.New("account disabled")
 	// ErrNotAuthenticated 未携带有效凭证或无有效会话（登出时 Cookie 缺失 / 会话已撤销或过期）。
 	ErrNotAuthenticated = errors.New("not authenticated")
+
+	// ErrServerCodeInvalid 服务器标识（code）格式不合法：非空、仅允许小写字母/数字/连字符、长度 1..64。
+	ErrServerCodeInvalid = errors.New("server code invalid")
+	// ErrServerNameInvalid 服务器展示名称不合法：非空、长度 1..128。
+	ErrServerNameInvalid = errors.New("server name invalid")
+	// ErrServerCodeTaken 服务器标识（code）已被占用（UNIQUE(code) 兜底）。
+	ErrServerCodeTaken = errors.New("server code taken")
+	// ErrServerNotFound 指定的游戏服务器不存在（按 code 查询无记录）。
+	ErrServerNotFound = errors.New("server not found")
 )
 
 // ErrorMeta 是某个业务哨兵错误对外暴露的元数据，作为 HTTP 与 WS 导出的唯一依据。
@@ -123,6 +132,34 @@ var errorMeta = map[error]ErrorMeta{
 		HTTPMsg:    "not authenticated",
 		WSCode:     "NOT_AUTHENTICATED",
 		WSMessage:  "会话已失效，请重新登录。",
+	},
+	ErrServerCodeInvalid: {
+		HTTPStatus: http.StatusBadRequest,
+		HTTPCode:   400,
+		HTTPMsg:    "server code invalid",
+		WSCode:     "SERVER_CODE_INVALID",
+		WSMessage:  "服务器标识格式不正确，仅允许小写字母、数字和连字符，长度 1-64。",
+	},
+	ErrServerNameInvalid: {
+		HTTPStatus: http.StatusBadRequest,
+		HTTPCode:   400,
+		HTTPMsg:    "server name invalid",
+		WSCode:     "SERVER_NAME_INVALID",
+		WSMessage:  "服务器名称不能为空，且长度不超过 128 字符。",
+	},
+	ErrServerCodeTaken: {
+		HTTPStatus: http.StatusConflict,
+		HTTPCode:   409,
+		HTTPMsg:    "server code taken",
+		WSCode:     "SERVER_CODE_TAKEN",
+		WSMessage:  "该服务器标识已被占用，请更换后重试。",
+	},
+	ErrServerNotFound: {
+		HTTPStatus: http.StatusNotFound,
+		HTTPCode:   404,
+		HTTPMsg:    "server not found",
+		WSCode:     "SERVER_NOT_FOUND",
+		WSMessage:  "未找到指定的游戏服务器。",
 	},
 	ErrInternal: {
 		HTTPStatus: http.StatusInternalServerError,

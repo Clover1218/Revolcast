@@ -65,3 +65,12 @@ const userRateLimitKeyPrefix = "revolcast:ratelimit:user:"
 func UserRateLimitKey(scope, subject string) string {
 	return userRateLimitKeyPrefix + scope + ":" + subject
 }
+
+// serverRateLimitKeyPrefix 对应 game_servers 管理/读接口的限流键名前缀：
+// revolcast:ratelimit:server:{scope}:{subject}，subject 为 IP 或全局标识。
+const serverRateLimitKeyPrefix = "revolcast:ratelimit:server:"
+
+// ServerRateLimitKey 拼装 game_servers 接口的限流键：revolcast:ratelimit:server:{scope}:{subject}。
+func ServerRateLimitKey(scope, subject string) string {
+	return serverRateLimitKeyPrefix + scope + ":" + subject
+}
