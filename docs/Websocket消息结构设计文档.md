@@ -110,7 +110,7 @@ Type字段基本格式如下：
 | :--- | :--- |
 | `type` | `event.game.player_join` / `player_quit` / `player_chat` / `player_command` |
 | `server_code` / `server_id` | 事件所属服务器（`server_id` 由服务端已鉴权身份派生，不可由 `server_name` 反查） |
-| `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339Nano 字符串 |
+| `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339Nano 字符串；`received_at` 精度为**毫秒**（落库前已截断），与 MongoDB 存储及 HTTP 事件查询（《HTTP 接口设计文档》§13）指向同一时刻 |
 | `data` | join/quit 为 `{}`；chat 为 `{message, raw_message, message_id}`；command 为 `{command, message_id}` |
 
 - `data.raw_message` 仅 chat 下发（Minecraft 文本组件 JSON）；command 的 `raw_message` 是 Java 对象 `toString`，无业务价值，不下发。

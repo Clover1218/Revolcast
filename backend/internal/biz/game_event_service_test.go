@@ -77,12 +77,14 @@ func TestGameEventService_Ingest_OK(t *testing.T) {
 				t.Errorf("Player 快照错误: %+v", doc.Player)
 			}
 			// occurred_at 由原始 timestamp（秒）转换：1792395025 -> 2026-10-19T07:30:25Z
-			if doc.OccurredAt != "2026-10-19T07:30:25Z" {
-				t.Errorf("OccurredAt = %q, want 2026-10-19T07:30:25Z", doc.OccurredAt)
+			// 时间为 BSON Date（time.Time），不再是字符串（见 repository.GameEventDoc 注释）。
+			wantOccurred := time.Date(2026, 10, 19, 7, 30, 25, 0, time.UTC)
+			if !doc.OccurredAt.Equal(wantOccurred) {
+				t.Errorf("OccurredAt = %v, want %v", doc.OccurredAt, wantOccurred)
 			}
-			// received_at 取后端收到时间
-			if doc.ReceivedAt != "2026-10-19T07:30:25.125Z" {
-				t.Errorf("ReceivedAt = %q, want 2026-10-19T07:30:25.125Z", doc.ReceivedAt)
+			// received_at 取后端收到时间，并截断到毫秒（与 BSON Date 精度、HTTP 输出一致）。
+			if !doc.ReceivedAt.Equal(recv) || doc.ReceivedAt.Nanosecond()%int(time.Millisecond) != 0 {
+				t.Errorf("ReceivedAt = %v, want %v（毫秒精度）", doc.ReceivedAt, recv)
 			}
 			if len(doc.Data) != tc.wantData {
 				t.Errorf("Data 键数 = %d, want %d (%v)", len(doc.Data), tc.wantData, doc.Data)

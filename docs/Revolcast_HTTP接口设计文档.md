@@ -70,8 +70,9 @@
 | 禁用游戏服务器 | `DELETE` | `/api/v1/game-servers/{code}` | 软禁用（status 1→0），保留审计与 FK 引用（管理接口，当前暂不鉴权） |
 | 轮换服务器密钥 | `POST` | `/api/v1/game-servers/{code}/rotate-secret` | 轮换 API Secret，返回一次性新 secret（管理接口，当前暂不鉴权） |
 | 订阅服务器事件流 | `GET` (WS) | `/api/v1/game-servers/{server_code}/ws` | 已登录用户通过 Session Cookie 订阅单个服务器的游戏事件推送（握手校验会话、限流、Origin 与 server_code，见 §12.10） |
+| 查询服务器事件 | `GET` | `/api/v1/game-servers/{server_code}/events` | 已登录用户以游标查询单个服务器的游戏事件历史/增量（`limit` / `before` / `after`，见 §13） |
 
-> `check-name`、`register`、`login` 为**未认证**接口（注册/查重发生在登录之前），限流 `subject` 取客户端 IP，而非用户身份；`bind-QQ`、`unbind-QQ` 为**已认证**接口，需携带 `revolcast_session` Cookie，限流 `subject` 取登录用户 `user_id`。
+> `check-name`、`register`、`login` 为**未认证**接口（注册/查重发生在登录之前），限流 `subject` 取客户端 IP，而非用户身份；`bind-QQ`、`unbind-QQ`、`events` 为**已认证**接口，需携带 `revolcast_session` Cookie，限流 `subject` 取登录用户 `user_id`。
 
 ---
 
@@ -501,6 +502,7 @@ check-name、register、login 均为未认证接口，限流 `subject` 默认取
 | unbind-QQ | `revolcast:ratelimit:user:unbind_qq:{user_id}` | 5 分钟 | 5 次 | 登录用户 `user_id`（已认证接口，见 §8） |
 | game-servers 管理 | `revolcast:ratelimit:server:manage:{ip}` | 5 分钟 | 20 次 | 客户端 IP（创建/更新/禁用/轮换，当前暂不鉴权，见 §12） |
 | game-servers 读 | `revolcast:ratelimit:server:read:{ip}` | 5 分钟 | 60 次 | 客户端 IP（列表/详情，公开，见 §12） |
+| game-servers 事件查询 | `revolcast:ratelimit:user:game_events:{user_id}` | 5 分钟 | 300 次 | 登录用户 `user_id`（§13，已认证接口） |
 | WS 握手（用户） | `revolcast:ratelimit:ws:handshake_user:{user_id}` | 5 分钟 | 20 次 | 登录用户 `user_id`（§12.10） |
 | WS 握手（IP） | `revolcast:ratelimit:ws:handshake_ip:{ip}` | 5 分钟 | 60 次 | 客户端 IP（§12.10） |
 
@@ -705,3 +707,179 @@ Session Token **只用于鉴权，不作为连接标识**；同一用户可并�
 
 **当前边界：** 本轮仅校验登录与服务器可用性，**未**接入 `server_game_bindings` 的归属与 `visibility`（公开/隐身）过滤；
 数据库文档 §1.1 规则 6 要求的「可见性规则须在 WebSocket 推送处统一执行」将在角色绑定能力落地时补齐（代码中以 TODO(visibility) 标注接入点）。
+
+---
+
+## 13. `GET /api/v1/game-servers/{server_code}/events` — 游戏服务器事件查询
+
+**触发端：** 网站前端 · **执行端：** Go Backend · **交付端：** HTTP 响应
+**数据依赖：** MongoDB 集合 `game_events`（《鹊桥与服务端WS连接格式详解》「建议转换存入MongoDB格式」）、PostgreSQL `game_servers`（§3.4）、Redis 限流（§9）
+**配套接口：** 实时推送见 §12.10（WebSocket），二者共同构成「历史 + 增量 + 实时」的事件获取链路。
+
+### 13.1 业务目标
+
+为前端提供三种查询能力，均限定在**单个服务器**范围内：
+
+| 场景 | 请求 | 用途 |
+| --- | --- | --- |
+| 首次加载 | `?limit=50` | 进入页面时取最近 N 条事件 |
+| 上滑加载更早 | `?before={cursor}&limit=50` | 取当前列表之前的历史，可**前置追加** |
+| 断线补齐 / 增量同步 | `?after={cursor}&limit=100` | 取游标之后的更新事件，可**后置追加** |
+
+### 13.2 请求
+
+`GET /api/v1/game-servers/{server_code}/events`
+
+| 参数 | 位置 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| `server_code` | path | `string` | 是 | 服务器短标识，须匹配 `^[a-z0-9-]{1,64}$` |
+| `limit` | query | `int` | 否 | 默认 `50`，合法区间 `1..100`；非整数或越界 → `400` |
+| `before` | query | `string` | 否 | 不透明游标，返回**严格早于**该游标的事件（更早历史） |
+| `after` | query | `string` | 否 | 不透明游标，返回**严格晚于**该游标的事件（增量补齐） |
+
+**参数规则**
+
+1. `before` 与 `after` **互斥**，同时提供 → `400`（`invalid param`）。
+2. 两者均不提供 → 查询最新事件。
+3. 游标必须能解码为 §13.3 定义的结构，否则 → `400`。空串视同未提供。
+4. `limit` 超上限**不**做静默截断（与 §12.3 列表接口的截断行为不同）：直接返回 `400`，避免前端误判页大小。
+5. `server_id` **不接受**前端传入；服务器归属一律由经过校验的 `server_code` 解析得到。
+
+### 13.3 游标设计
+
+游标为**不透明字符串**，前端不得解析，只做原样回传：
+
+```
+cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<ObjectId hex>"} )
+```
+
+- 采用 `base64.RawURLEncoding`（无 padding、URL 安全字符集）。
+- `t` 必填且 `> 0`；`id` 必填且为 24 位十六进制 ObjectId；任一不满足即视为非法游标。
+- **统一排序与比较规则：`received_at ASC, _id ASC`**。
+- 严格游标条件：
+
+| 方向 | 条件 |
+| --- | --- |
+| `before` | `received_at < t` **或**（`received_at = t` **且** `_id < id`） |
+| `after` | `received_at > t` **或**（`received_at = t` **且** `_id > id`） |
+
+**为什么用复合游标：** 同一毫秒内可能有多条事件（例如 join 后立刻 quit），仅用时间戳会重复或遗漏。`_id`（ObjectId）在集合内唯一且不可变，作为**同一毫秒内的稳定全序**；但它**不承担顺序号语义**（不保证严格反映写入顺序，也不做递增性依赖），排序始终以 `received_at` 为主键。
+
+**不使用 `occurred_at` 作游标：** 游戏事件发生时间与后端接收时间可能存在延迟或乱序，用 `occurred_at` 分页会出现「晚到但时间早」的事件被永久跳过。
+
+### 13.4 响应
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "items": [
+      {
+        "event_type": "player_chat",
+        "server_name": "TestServer",
+        "server_id": 1,
+        "player": { "uuid": "a3b91ae7-...", "nickname": "PlantClover", "is_op": true },
+        "occurred_at": "2026-10-19T07:29:37.000Z",
+        "received_at": "2026-10-19T07:29:37.125Z",
+        "data": { "message": "有人吗", "raw_message": "{\"text\":\"有人吗\"}", "message_id": "" },
+        "cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9"
+      }
+    ],
+    "oldest_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "newest_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "next_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "has_more": false
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `items` | `array` | 当前页事件，**统一升序**（`received_at ASC, _id ASC`） |
+| `items[].event_type` | `string` | `player_join` / `player_quit` / `player_chat` / `player_command` |
+| `items[].server_name` | `string` | 事件上报时的服务器名快照，**仅展示**；归属以 `server_id` 为准 |
+| `items[].server_id` | `int64` | `game_servers.id`，来自落库时已鉴权的服务器身份 |
+| `items[].player` | `object` | `{uuid, nickname, is_op}` 快照 |
+| `items[].occurred_at` | `string` | 事件发生时间，UTC RFC3339，毫秒精度 |
+| `items[].received_at` | `string` | 后端接收时间，UTC RFC3339，毫秒精度（**分页依据**） |
+| `items[].data` | `object` | `player_join`/`player_quit` → `{}`；`player_chat` → `message` / `raw_message` / `message_id`；`player_command` → `command` / `message_id`（`raw_message` 为 Java 对象 toString，与 §12.10 推送一致**不下发**）；零值字段省略 |
+| `items[].cursor` | `string` | 该事件的游标，供前端保存「最后已处理位置」 |
+| `oldest_cursor` | `string \| null` | 本页**最早**事件游标；空页为 `null` |
+| `newest_cursor` | `string \| null` | 本页**最新**事件游标；空页为 `null` |
+| `next_cursor` | `string \| null` | **沿当前方向继续翻页**的游标：`before` 模式 = `oldest_cursor`；默认 / `after` 模式 = `newest_cursor`；空页为 `null` |
+| `has_more` | `bool` | 当前方向是否还有下一页（以 `limit + 1` 探测得出） |
+
+**游标语义唯一化说明：** 不使用单一 `next_cursor` 兼任两个方向（`before` 场景下「下一页」指更早、`after` 场景下指更新，同名不同义会让前端误判）。`oldest_cursor` / `newest_cursor` 描述本页边界，`next_cursor` 只描述「沿当前方向继续」这一件事，二者可同时取用：
+
+- 上滑加载更多：用 `before` + `oldest_cursor`；
+- 断线补齐：用 `after` + `newest_cursor`（即使 `has_more=false`，仍需保存 `newest_cursor` 作为下次补齐起点）。
+
+**不暴露内容：** `_id` 不出现在响应任何字段中（仅藏于游标内）；不返回 MongoDB 原始文档。
+
+### 13.5 主流程
+
+1. 读取 Cookie `revolcast_session` → `biz.AuthService.ResolveUserID`：缺失 / 失效 → `401`。
+2. 参数校验：`limit` 区间、`before`/`after` 互斥、游标解码与格式 → 失败 `400`。
+3. 限流：`revolcast:ratelimit:user:game_events:{user_id}`，窗口 5 分钟 / 300 次 → 命中 `429`（Redis 故障 fail-open，仅记日志）。
+4. 解析服务器：`server_code` 格式 → `400`；不存在 → `404`；`status != 1` → `403`（`server disabled`）。
+5. MongoDB 查询：过滤条件必含 `server_id`（由第 4 步解析得到）+ 游标条件，排序见 §13.6，取 `limit + 1` 条。
+6. 组装：多取的那一条仅用于判定 `has_more`，随后丢弃；`before`/默认模式由降序翻转为升序；计算 `oldest_cursor` / `newest_cursor` / `next_cursor`。
+7. 返回 `200`。
+
+**空结果不是错误：** 没有更早历史（`before`）、没有新事件（`after`）、集合为空，均返回 `200` + `items: []` + `has_more: false`。
+
+### 13.6 MongoDB 查询与索引
+
+| 模式 | filter | sort | 结果处理 |
+| --- | --- | --- | --- |
+| 默认（最新） | `{server_id}` | `{received_at:-1, _id:-1}` | 取 `limit+1` → 丢弃多余 → **反转为升序** |
+| `before` | `{server_id, $or:[{received_at:{$lt:t}}, {received_at:t, _id:{$lt:id}}]}` | `{received_at:-1, _id:-1}` | 同上 |
+| `after` | `{server_id, $or:[{received_at:{$gt:t}}, {received_at:t, _id:{$gt:id}}]}` | `{received_at:1, _id:1}` | 取 `limit+1` → 丢弃多余（天然升序） |
+
+**复合索引（新增）**
+
+```
+{ server_id: 1, received_at: 1, _id: 1 }
+```
+
+- 字段顺序理由：`server_id` 为等值过滤前缀 → `received_at` 承担范围/排序 → `_id` 作为同一毫秒内的稳定 tie-break。该索引同时支撑「升序游标」与「降序取最新 + 反转」两种访问形态（反向扫描同一索引即可），因此只需一个复合索引，无需额外建 `{server_id:1, received_at:-1}`。
+- 由 `repository.GameEventRepo.EnsureIndexes` 在服务启动时**幂等**创建（与既有索引共存，不删除 `{server_id}`、`{event_type}`、`{server_id, occurred_at}`）。
+- 禁止先读全集合再在内存过滤/排序/分页。
+
+### 13.7 存储格式变更（重要）
+
+本轮将 `game_events.received_at` / `occurred_at` 由 **ISO8601 字符串**改为 **BSON Date**（`time.Time`），原因：
+
+- 原实现使用 `time.RFC3339Nano` 写字符串，尾部 0 被裁剪，小数位长度不定（如 `...34.522048Z` 为 6 位、`...34.4011185Z` 为 7 位）。**字符串字典序不等于时间序**：`...34.5Z` 字典序大于 `...34.522048Z`，但真实时间更早。用它做游标比较会导致翻页重复/遗漏。
+- BSON Date 由 MongoDB 原生按时间比较，可正确命中复合索引；精度到毫秒，同一毫秒由 `_id` 兜底。
+
+**存量数据必须迁移**：`backend/cmd/migrate-game-events` 一次性将字符串字段解析为 Date（幂等，可重复执行）。未迁移的字符串文档与 Date 属于不同 BSON 类型比较域，会从范围查询中消失。迁移完成后再对外提供本接口。
+
+**时间精度**：接口对外统一输出**毫秒**精度（`2006-01-02T15:04:05.000Z`），与存储精度一致；`Ingest` 落库前将 `received_at` 截断到毫秒，保证 WebSocket 推送与 HTTP 查询指向同一时刻。
+
+### 13.8 与 WebSocket 的协作
+
+- **首次加载** → 本接口默认模式（最新 N 条）。
+- **上滑历史** → 本接口 `before` 模式，结果前置追加。
+- **实时增量** → §12.10 WebSocket 推送。
+- **断线恢复** → 保存「最后已处理事件的游标」，重连后以 `after` 补齐；补齐期间实时推送可能与之重叠，**前端必须按事件游标（或 `_id` 级稳定标识）去重**，不能仅凭 `received_at`——同一毫秒可能有多条不同事件。
+
+### 13.9 鉴权与可见性边界
+
+沿用 §12.10 的口径：本轮仅校验「已登录 + 服务器存在且启用」，**未**接入 `server_game_bindings` 的归属关系与 `visibility`（公开/隐身）过滤；任意登录用户可读取任意启用服务器的事件。角色绑定能力落地时，本接口需与推送侧共用同一套可见性判定（代码中以 `TODO(visibility)` 标注接入点）。
+
+### 13.10 异常情况
+
+| 场景 | code | 说明 |
+| --- | --- | --- |
+| 未携带 / 失效会话 Cookie | `401` | `not authenticated` |
+| `limit` 非整数、`<=0`、`>100` | `400` | `invalid param` |
+| `before` 与 `after` 同时提供 | `400` | `invalid param` |
+| 游标无法解码 / 字段缺失 / 非 ObjectId | `400` | `invalid param` |
+| `server_code` 格式非法 | `400` | `server code invalid` |
+| 服务器不存在 | `404` | `server not found` |
+| 服务器已停用 | `403` | `server disabled` |
+| 命中限流 | `429` | `rate limited` |
+| MongoDB 查询失败 | `500` | `internal error`（根因仅进日志） |
+| 无更早历史 / 无新事件 / 空集合 | `200` | `items: []`，不报错 |

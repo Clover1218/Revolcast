@@ -127,6 +127,12 @@ func main() {
 	mux.Handle("/api/v1/game-servers/{code}", transport.CORSMiddleware(http.HandlerFunc(gameServerHandler.Item)))
 	mux.Handle("/api/v1/game-servers/{code}/rotate-secret", transport.CORSMiddleware(http.HandlerFunc(gameServerHandler.RotateSecret)))
 
+	// HTTP 游戏事件查询（MongoDB game_events）：首屏历史 / 上滑更早 / 断线补齐，与 WS 推送配合。
+	// 详见《Revolcast HTTP 接口设计文档》§13。
+	gameEventQuerySvc := biz.NewGameEventQueryService(gameEventRepo, gameServerSvc, redisRepo, biz.GameEventQueryConfig{})
+	gameEventHandler := transport.NewGameEventHandler(gameEventQuerySvc, authSvc, baseLogger)
+	mux.Handle("/api/v1/game-servers/{server_code}/events", transport.CORSMiddleware(http.HandlerFunc(gameEventHandler.Events)))
+
 	srv := &http.Server{
 		Addr:         cfg.WS.Addr,
 		Handler:      mux,

@@ -75,8 +75,10 @@ func (s *GameEventService) Ingest(ctx context.Context, serverID int64, receivedA
 		EventType:  ev.SubType,
 		Player:     ev.Player,
 		// 事件发生时间：原始 timestamp（秒级）；后端收到时间：WS 读取时刻。
+		// ReceivedAt 截断到毫秒：MongoDB BSON Date 精度为毫秒，截断后「推送值」与「落库值」严格一致，
+		// 前端按游标补齐时不会因精度差产生重复或遗漏。
 		OccurredAt: time.Unix(ev.Timestamp, 0).UTC(),
-		ReceivedAt: receivedAt.UTC(),
+		ReceivedAt: receivedAt.UTC().Truncate(time.Millisecond),
 		Message:    ev.Message,
 		RawMessage: ev.RawMessage,
 		MessageID:  ev.MessageID,
@@ -92,8 +94,9 @@ func (s *GameEventService) Ingest(ctx context.Context, serverID int64, receivedA
 			Nickname: view.Player.Nickname,
 			IsOp:     view.Player.IsOp,
 		},
-		OccurredAt: view.OccurredAt.Format(time.RFC3339Nano),
-		ReceivedAt: view.ReceivedAt.Format(time.RFC3339Nano),
+		// 时间字段以 BSON Date 写入（见 repository.GameEventDoc 注释）：字符串无法支撑游标分页。
+		OccurredAt: view.OccurredAt,
+		ReceivedAt: view.ReceivedAt,
 		Data:       buildGameEventData(view),
 	}
 

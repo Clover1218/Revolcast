@@ -87,7 +87,8 @@
 > - **`event_type`**：取原始 JSON 的 `sub_type` 字符串值，取值 `player_join` / `player_quit` / `player_chat` / `player_command`（**不要用 int**）。
 > - **`server_id`**：`int64`，来自本服务器 WebSocket 连接的**已鉴权身份**（`clientID = game_servers.id`），**不要**由 `server_name` 反查；`server_name` 仅作为展示/自检字段原样存储。
 > - **`player`**：统一保存 `{ uuid, nickname, is_op }` 快照。
-> - **`occurred_at`**：由原始 `timestamp`（秒级 Unix 时间戳）转为 UTC ISO8601；**`received_at`**：后端收到事件时写入的 UTC 时间。
+> - **`occurred_at`**：由原始 `timestamp`（秒级 Unix 时间戳）转为 UTC 时间；**`received_at`**：后端收到事件后写入的 UTC 时间，截断到**毫秒**。
+> - **时间字段存储类型为 BSON Date**（不是字符串）。⚠️ 历史版本曾以 `time.RFC3339Nano` 字符串存储，尾部 0 被裁剪导致小数位长度不定（`...34.5Z` 字典序大于 `...34.522048Z`，但时间更早），无法用于游标分页；已由 `backend/cmd/migrate-game-events` 一次性迁移为 Date。**新写入代码必须用 `time.Time`，禁止再写字符串**。下方 JSON 示例中的时间以 ISO8601 展示仅为可读性，Extended JSON 形式为 `{"$date":"2026-10-19T07:30:25.125Z"}`。
 > - **`_id`**：由 MongoDB 自动生成 `ObjectId`，应用层不赋值（下方示例省略）。
 
 以下值必填:
@@ -100,8 +101,8 @@
 | player.uuid | str | 玩家uuid，提取自原始JSON的`player.uuid` |
 | player.nickname | str | 玩家昵称，提取自原始JSON的`player.nickname` |
 | player.is_op | bool | 玩家是否为管理员，提取自原始JSON的`player.is_op` |
-| occurred_at | str(ISO8601 UTC) | 事件发生时间，由原始JSON的`timestamp`（秒）转换 |
-| received_at | str(ISO8601 UTC) | 后端收到该事件时的时间 |
+| occurred_at | Date(BSON, UTC) | 事件发生时间，由原始JSON的`timestamp`（秒）转换 |
+| received_at | Date(BSON, UTC) | 后端收到该事件时的时间（毫秒精度） |
 | data | object | 事件数据；PlayerJoinEvent 无额外字段，固定为 `{}` |
 
 ```json
@@ -170,8 +171,8 @@
 | player.uuid | str | 提取自`player.uuid` |
 | player.nickname | str | 提取自`player.nickname` |
 | player.is_op | bool | 提取自`player.is_op` |
-| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
-| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| occurred_at | Date(BSON, UTC) | 由`timestamp`（秒）转换 |
+| received_at | Date(BSON, UTC) | 后端收到时间（毫秒精度） |
 | data | object | 固定为 `{}` |
 
 ```json
@@ -242,8 +243,8 @@
 | server_name | str | 原样提取自原始JSON的`server_name` |
 | server_id | int64 | `game_servers.id`，来自 WS 连接已鉴权身份 |
 | player | object | 玩家对象快照（uuid / nickname / is_op） |
-| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
-| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| occurred_at | Date(BSON, UTC) | 由`timestamp`（秒）转换 |
+| received_at | Date(BSON, UTC) | 后端收到时间（毫秒精度） |
 | data | object | 聊天数据 |
 | data.message | str | 纯文本消息，提取自原始JSON的`message` |
 | data.raw_message | str | 原始消息（Minecraft 文本组件 JSON 字符串），提取自`raw_message` |
@@ -325,8 +326,8 @@
 | server_name | str | 原样提取自原始JSON的`server_name` |
 | server_id | int64 | `game_servers.id`，来自 WS 连接已鉴权身份 |
 | player | object | 玩家对象快照（uuid / nickname / is_op） |
-| occurred_at | str(ISO8601 UTC) | 由`timestamp`（秒）转换 |
-| received_at | str(ISO8601 UTC) | 后端收到时间 |
+| occurred_at | Date(BSON, UTC) | 由`timestamp`（秒）转换 |
+| received_at | Date(BSON, UTC) | 后端收到时间（毫秒精度） |
 | data | object | 命令数据 |
 | data.command | str | 玩家输入的命令（不含前导 `/`），提取自`command` |
 | data.raw_message | str | 原始消息；⚠️ 本事件中 `raw_message` 为 Java 对象 `toString`（如 `com.mojang.brigadier.context.CommandContextBuilder@...`），通常无业务价值，原样留存以便排查 |
