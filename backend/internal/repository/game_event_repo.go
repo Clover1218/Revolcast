@@ -87,6 +87,9 @@ type GameEventQuery struct {
 	Cursor GameEventCursorPoint
 	// Limit 是期望返回条数（>0）；仓库内部多取 1 条用于探测是否还有下一页。
 	Limit int
+	// ExcludeEventTypes 是要排除的事件类型（event_type 字段值，如 "player_command"）。
+	// 用于「内部审计事件不对外」的可见性策略；为空表示不过滤。
+	ExcludeEventTypes []string
 }
 
 // GameEventRepo 封装 game_events 集合的写入、查询与索引管理（MongoDB）。
@@ -181,6 +184,11 @@ func (r *GameEventRepo) QueryGameEvents(ctx context.Context, q GameEventQuery) (
 // 仅比较时间戳会在同一毫秒内的多条事件上产生重复或遗漏，故必须带 _id tie-break。
 func gameEventFilter(q GameEventQuery) bson.D {
 	filter := bson.D{{Key: "server_id", Value: q.ServerID}}
+	// 可见性过滤：内部审计事件（如 player_command）不对外返回。放在 server_id 之后，
+	// 仍可命中复合索引 {server_id, received_at, _id} 的范围扫描。
+	if len(q.ExcludeEventTypes) > 0 {
+		filter = append(filter, bson.E{Key: "event_type", Value: bson.D{{Key: "$nin", Value: q.ExcludeEventTypes}}})
+	}
 	switch q.Direction {
 	case GameEventBefore, GameEventAfter:
 		var cmpOp string

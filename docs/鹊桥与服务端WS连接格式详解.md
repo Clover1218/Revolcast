@@ -469,75 +469,34 @@
 }
 ```
 
-### 服务器状态
-+ favicon 字段为服务器图标，格式为 data:image/png;base64,... 的 Base64 编码字符串，仅当设置了服务器图标时才会返回。
+### 发送RCON命令
+
 #### 请求体
+| 字段路径 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| data.command | string | - | 将要远程执行的命令 |
 示例：
 ```json
 {
-  "api": "get_status",
-  "echo": "1"
+    "api": "send_rcon_command",
+    "data": {
+        "command": "list uuids"
+    },
+    "echo": "1"
 }
 ```
 #### 响应体
+| 字段路径 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| data | string | - | 命令回显 |
 ```json
 {
-  "api": "get_status",
-  "code": 200,
-  "post_type": "response",
-  "status": "SUCCESS",
-  "message": "success",
-  "data": {
-    "timestamp": 1792400686470,
-    "server_type": "forge",
-    "server_version": "1.20.1",
-    "server_list_ping": {
-      "available": true,
-      "host": "127.0.0.1",
-      "port": 25565,
-      "reason": "ok",
-      "error": null,
-      "forgeData": {
-        "channels": [],
-        "mods": [],
-        "truncated": false,
-        "fmlNetworkVersion": 3,
-        "d": "ë\u0000\u0000ࠊ㐤獋㙖⹌ᦘ̺⸱恤䒸⡑⛧沮婙㨹牥ఈㄵচ₀沮婙㨹牥ఈㄵচ偀泀岛㊳ఀ勨䦕᫻⛷⺎定Ƴ⸱`䰔掃䚖⁮䮌ई僆内歋瘖䲬ౄᤗ㐮扖䢸熁㌒泅岛㊳昉壒綕଒㘶⁭஌昌壒綕䌚昖ⷍ嬙ᢁ〮 ▘ᮓ睇ⷋ崙㞻歲峒ඝ熈ጂʠ寙㜻潬䣂᥽捋癖౫ᡚ㜷汥戆䂸\tၰ⺮屙ゴկ屠㣔Ɓ႐౬婝㜷楬ૄ㣀燉̲"
-      },
-      "description": {
-        "text": "A Minecraft Server"
-      },
-      "players": {
-        "max": 20,
-        "online": 0
-      },
-      "version": {
-        "name": "1.20.1",
-        "protocol": 763
-      }
-    },
-    "cpu_information": {
-      "cpu_cores": 32,
-      "load_average": -1,
-      "system_load": 0,
-      "process_load": -1
-    },
-    "memory_information": {
-      "physical_memory": {
-        "total": 16779849728,
-        "free": 3478147072,
-        "used": 13301702656,
-        "percentage": 79.27
-      },
-      "jvm_memory": {
-        "total": 1161822208,
-        "free": 510322464,
-        "max": 4196401152,
-        "used": 651499744,
-        "percentage": 15.53
-      }
-    }
-  },
-  "echo": "1"
+    "code": 200,
+    "api": "send_rcon_command",
+    "post_type": "response",
+    "status": "SUCCESS",
+    "message": "success",
+    "data": "There are 3 of a max of 20 players online: Bot1 (51a4b33d-8b80-3bde-806f-de4086b03058), Bot2 (16beaa94-ff1b-37a7-8afb-c22dcb8c16d1), Bot3 (73f370b4-497b-347a-a6bb-50d07eb88947)",
+    "echo": "1"
 }
 ```

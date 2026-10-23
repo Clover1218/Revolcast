@@ -396,13 +396,16 @@ Redis 不作为账号、绑定或消息历史的权威存储。以下为建议�
 
 | Key 模式                                       | 类型             | 用途                         | 生命周期/说明                               |
 | -------------------------------------------- | -------------- | -------------------------- | ------------------------------------- |
-| `revolcast:server:{server_id}:heartbeat`     | Hash / String  | 最近心跳、在线人数、最大人数、MOTD、最后更新时间 | 设置 TTL；过期后显示 `stale/unknown`，不要直接等同离线 |
+| `revolcast:server:{server_id}:heartbeat`     | Hash / String  | ~~最近心跳、在线人数、最大人数、MOTD、最后更新时间~~ | **已被下行 `revolcast:server:status:{server_code}` 取代**（未实现过；改用 code 定位以避免查询侧反查 id） |
 | `revolcast:ratelimit:{scope}:{subject}`      | String/Counter | 登录、发码、发消息、API 请求限流         | 短 TTL                                 |
 | `revolcast:nonce:{server_id}:{nonce}`        | String         | API 签名防重放                  | TTL 覆盖允许的时钟偏差窗口                       |
 | `revolcast:bindcode:attempt:{subject}`       | Counter        | 绑定码尝试次数限制                  | 短 TTL；真实绑定码仍以 PostgreSQL 为准           |
 | `revolcast:ws:presence:{user_id}`            | String/Hash    | WebSocket 在线状态（如需要）        | TTL + 心跳续期                            |
 | `revolcast:cache:server:{server_id}:summary` | Hash/JSON      | 服务器展示信息缓存                  | 可失效重建，不作为权威配置                         |
 | `revolcast:cache:server:list:available`      | String (JSON)  | 可用服务器列表（QQ `server list` 指令用） | TTL 300s；`game_servers` 创建/更新/停用后主动 DEL，读失败 fail-open |
+| `revolcast:ratelimit:qq:game_bind:{qq_uin}:{server_code}` | Counter | QQ 侧生成游戏角色绑定码的限流（BIZ-009） | 5 分钟 5 次；放在只读幂等校验之后，Redis 故障 fail-open |
+| `revolcast:ratelimit:game:redeem:{server_id}:{player_uuid}` | Counter | 游戏内兑换角色绑定码的限流（BIZ-010） | 5 分钟 5 次；**前置计数**（码格式校验后立即计数，用于拦截猜码），Redis 故障 fail-open |
+| `revolcast:server:status:{server_code}` | String (JSON) | 服务器在线状态快照：`{server_id, server_code, online, max_players, players[{nickname,uuid}], updated_at, source}`（BIZ-012） | TTL = 3 × 采集周期（默认 180s）；每 60s 由 `send_rcon_command: list uuids` 采集覆盖写入；WS 连接注销时主动 DEL；**可随时重建，非权威数据**，查询侧 fail-closed（Redis 故障回「暂时不可用」） |
 
 不要仅依赖 Redis TTL 实现绑定码一次性消费；PostgreSQL 的原子更新与事务才是权威。在线状态的过期表示“最近未收到心跳”，应展示为未知/过期状态，而非必然判定服务器进程已停止。
 

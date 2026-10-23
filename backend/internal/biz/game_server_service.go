@@ -223,6 +223,25 @@ func (s *GameServerService) ResolveSubscribableServer(ctx context.Context, code 
 	return rec, nil
 }
 
+// ResolveServer 以「存在即可」语义解析游戏服务器：格式非法 / 不存在 → ErrServerNotFound。
+//
+// 与 ResolveSubscribableServer 的唯一区别是**不校验 status**：解绑这类「对已存在关系生效」的
+// 操作不应因为服务器被停用而无法执行，否则用户的历史绑定会被锁死。订阅事件、发绑定码等
+// 「此刻能否使用该服务器」的判定仍必须走 ResolveSubscribableServer。
+func (s *GameServerService) ResolveServer(ctx context.Context, code string) (*repository.GameServerRecord, error) {
+	if !validateServerCode(code) {
+		return nil, Wrap(ErrServerNotFound, ErrServerCodeInvalid, "服务器标识格式非法")
+	}
+	rec, err := s.store.GetGameServerByCode(ctx, code)
+	if err != nil {
+		if errors.Is(err, repository.ErrServerNotFound) {
+			return nil, Wrap(ErrServerNotFound, err, "查询游戏服务器失败")
+		}
+		return nil, Wrap(ErrInternal, err, "查询游戏服务器失败")
+	}
+	return rec, nil
+}
+
 // List 分页列出游戏服务器。statusFilter 为 nil 时不过滤。actorKey 取客户端 IP。
 func (s *GameServerService) List(ctx context.Context, actorKey string, statusFilter *int16, limit, offset int) ([]*repository.GameServerRecord, error) {
 	allowed, rlErr := s.rl.AllowAttempt(ctx, repository.ServerRateLimitKey("read", actorKey), s.cfg.ReadRateLimitWindow, s.cfg.ReadRateLimitMax)

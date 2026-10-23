@@ -25,6 +25,9 @@ func TestParseCommand(t *testing.T) {
 		{"服务器绑定", "revolcast server element bind", commandServerBind, "element"},
 		{"服务器绑定-代号大写", "revolcast server ELEMENT bind", commandServerBind, "element"},
 		{"服务器绑定-代号含连字符", "revolcast server survival-01 bind", commandServerBind, "survival-01"},
+		{"服务器状态", "revolcast server element status", commandServerStatus, "element"},
+		{"服务器状态-大写", "Revolcast Server ELEMENT STATUS", commandServerStatus, "element"},
+		{"服务器状态-多余空格", "  revolcast   server   element   status  ", commandServerStatus, "element"},
 		// 前缀门禁：普通私聊必须被忽略（Adapter 会转发全部私聊）。
 		{"普通聊天", "你好啊", commandNone, ""},
 		{"空消息", "", commandNone, ""},
@@ -38,6 +41,9 @@ func TestParseCommand(t *testing.T) {
 		{"缺代号", "revolcast server bind", commandHelp, ""},
 		{"多参数", "revolcast server element bind now", commandHelp, ""},
 		{"list 带多余参数", "revolcast server list all", commandHelp, ""},
+		{"status 缺代号", "revolcast server status", commandHelp, ""},
+		{"status 带多余参数", "revolcast server element status now", commandHelp, ""},
+		{"未知子命令（同层）", "revolcast server element stats", commandHelp, ""},
 	}
 
 	for _, c := range cases {
@@ -163,5 +169,64 @@ func TestRemainingMinutes_MinimumOne(t *testing.T) {
 	}
 	if got := remainingMinutes(time.Now().Add(10 * time.Minute)); got != 9 && got != 10 {
 		t.Fatalf("10 分钟有效期应显示 9~10，实际 %d", got)
+	}
+}
+
+// ---- renderServerStatus（BIZ-012） ----
+
+// TestRenderServerStatus_Players 有人在线时按「当前服务器有 N 人：A，B」渲染。
+func TestRenderServerStatus_Players(t *testing.T) {
+	got := renderServerStatus("element", &biz.ServerStatusView{
+		ServerCode: "element",
+		Online:     3,
+		MaxPlayers: 20,
+		Players: []biz.StatusPlayer{
+			{Nickname: "Bot1"}, {Nickname: "Bot2"}, {Nickname: "Bot3"},
+		},
+	})
+	want := "当前服务器有 3 人：Bot1，Bot2，Bot3"
+	if got != want {
+		t.Fatalf("文案不符:\n实际: %s\n期望: %s", got, want)
+	}
+}
+
+// TestRenderServerStatus_Empty 有快照但 0 人：与「未找到」是两种结论。
+func TestRenderServerStatus_Empty(t *testing.T) {
+	got := renderServerStatus("element", &biz.ServerStatusView{ServerCode: "element", Online: 0})
+	if got != "当前服务器没有玩家在线。" {
+		t.Fatalf("0 人文案不符: %s", got)
+	}
+}
+
+// TestRenderServerStatus_NotFound 没有快照时给出可执行指引，不暴露内部细节。
+func TestRenderServerStatus_NotFound(t *testing.T) {
+	got := renderServerStatus("element", nil)
+	if !strings.Contains(got, "未找到「element」的服务器状态") || !strings.Contains(got, "联系管理员") {
+		t.Fatalf("未找到文案不符: %s", got)
+	}
+}
+
+// TestRenderServerStatus_Truncation 超过 30 人只列前 30 个昵称并提示。
+func TestRenderServerStatus_Truncation(t *testing.T) {
+	players := make([]biz.StatusPlayer, serverStatusMaxNames+5)
+	for i := range players {
+		players[i] = biz.StatusPlayer{Nickname: "p"}
+	}
+	got := renderServerStatus("element", &biz.ServerStatusView{
+		Online: len(players), Players: players,
+	})
+	if n := strings.Count(got, "p"); n != serverStatusMaxNames {
+		t.Fatalf("应只展示 %d 个昵称，实际 %d", serverStatusMaxNames, n)
+	}
+	if !strings.Contains(got, "仅显示前 30 人") {
+		t.Fatalf("缺少截断提示: %s", got)
+	}
+}
+
+// TestRenderServerStatus_NoNicknames 人数 > 0 但昵称全部不可用（解析时被跳过）只报人数。
+func TestRenderServerStatus_NoNicknames(t *testing.T) {
+	got := renderServerStatus("element", &biz.ServerStatusView{Online: 4})
+	if got != "当前服务器有 4 人在线。" {
+		t.Fatalf("无昵称文案不符: %s", got)
 	}
 }

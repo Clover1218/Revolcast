@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -83,4 +84,17 @@ const wsRateLimitKeyPrefix = "revolcast:ratelimit:ws:"
 // WSRateLimitKey 拼装 WebSocket 相关限流键：revolcast:ratelimit:ws:{scope}:{subject}。
 func WSRateLimitKey(scope, subject string) string {
 	return wsRateLimitKeyPrefix + scope + ":" + subject
+}
+
+// gameRateLimitKeyPrefix 对应游戏内指令的限流键名前缀：
+// revolcast:ratelimit:game:{scope}:{server_id}:{subject}。
+const gameRateLimitKeyPrefix = "revolcast:ratelimit:game:"
+
+// GameRedeemRateLimitKey 拼装「游戏内兑换角色绑定码」的限流键。
+//
+// 维度为 (server_id + player_uuid)：同一玩家在不同服务器分别计数；同一服务器内一个角色
+// 的尝试次数被独立限制。与 BIZ-009 的发码限流（qq_uin + server_code）不同，
+// 这里是**猜码**场景，必须在查询绑定码之前计数（见《游戏角色绑定与解绑闭环方案》§9）。
+func GameRedeemRateLimitKey(serverID int64, playerUUID string) string {
+	return gameRateLimitKeyPrefix + "redeem:" + strconv.FormatInt(serverID, 10) + ":" + playerUUID
 }

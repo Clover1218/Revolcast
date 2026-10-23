@@ -42,6 +42,11 @@ var (
 	_ GameServerResolver = (*GameServerService)(nil)
 )
 
+// gameEventInternalOnlyTypes 是不对外暴露的事件类型：只落库供内部审计，
+// 不出现在 HTTP 事件查询与 WebSocket 推送中（见《游戏角色绑定与解绑闭环方案》§8）。
+// 定义在 biz 层而非 transport：可见性属于数据策略，任何查询入口都必须遵守。
+var gameEventInternalOnlyTypes = []string{protocol.SubTypePlayerCommand}
+
 // GameEventQueryParams 是事件查询的入参（来自 HTTP query）。
 // Limit 为 nil 表示未提供，按 GameEventDefaultLimit 处理；显式提供则必须落在 1..100
 // （用指针区分「未提供」与「显式传 0」，后者是非法值）。Before / After 为空串表示未提供。
@@ -141,6 +146,9 @@ func (s *GameEventQueryService) Query(ctx context.Context, actorKey, serverCode 
 		Direction: dir,
 		Cursor:    cursor,
 		Limit:     limit,
+		// player_command 是内部审计事件，命令原文可能含绑定码等敏感参数，不对外返回。
+		// 规则集中在 biz 层，保证任何查询入口都不会漏掉（详见方案 §8）。
+		ExcludeEventTypes: gameEventInternalOnlyTypes,
 	})
 	if err != nil {
 		return nil, Wrap(ErrInternal, err, "查询游戏事件失败")

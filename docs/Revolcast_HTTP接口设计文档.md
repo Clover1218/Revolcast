@@ -802,13 +802,13 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 | --- | --- | --- |
 | `items` | `array` | 当前页事件，**统一升序**（`received_at ASC, _id ASC`） |
 | `items[].id` | `string` | **事件统一身份**：持久化文档 `_id` 的 24 位十六进制串。前端**唯一去重键**；与 WebSocket 推送的 `payload.id` 完全相同（§12.10） |
-| `items[].event_type` | `string` | `player_join` / `player_quit` / `player_chat` / `player_command` |
+| `items[].event_type` | `string` | `player_join` / `player_quit` / `player_chat`。`player_command` 为**内部审计事件**，不会出现在查询结果中（见下方说明） |
 | `items[].server_name` | `string` | 事件上报时的服务器名快照，**仅展示**；归属以 `server_id` 为准 |
 | `items[].server_id` | `int64` | `game_servers.id`，来自落库时已鉴权的服务器身份 |
 | `items[].player` | `object` | `{uuid, nickname, is_op}` 快照 |
 | `items[].occurred_at` | `string` | 事件发生时间，UTC RFC3339，固定毫秒精度（`2006-01-02T15:04:05.000Z`） |
 | `items[].received_at` | `string` | 后端接收时间，UTC RFC3339，固定毫秒精度（**分页依据**） |
-| `items[].data` | `object` | `player_join`/`player_quit` → `{}`；`player_chat` → `message` / `raw_message` / `message_id`；`player_command` → `command` / `message_id`（`raw_message` 为 Java 对象 toString，与 §12.10 推送一致**不下发**）；零值字段省略 |
+| `items[].data` | `object` | `player_join`/`player_quit` → `{}`；`player_chat` → `message` / `raw_message` / `message_id`；零值字段省略 |
 | `items[].cursor` | `string` | 该事件的游标（由 `received_at` + `_id` 确定性生成），供前端保存分页位置；与 WS 推送的 `payload.cursor` 完全相同 |
 | `oldest_cursor` | `string \| null` | 本页**最早**事件游标；空页为 `null` |
 | `newest_cursor` | `string \| null` | 本页**最新**事件游标；空页为 `null` |
@@ -821,6 +821,8 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 - 断线补齐：用 `after` + `newest_cursor`（即使 `has_more=false`，仍需保存 `newest_cursor` 作为下次补齐起点）。
 
 **不暴露内容：** `_id` 只以 `items[].id`（24 位十六进制）这一个字段出现，**不返回** MongoDB 原始文档、`bson` 内部字段或其他集合字段。
+
+**可见性：`player_command` 不对外。** 玩家命令事件只作为**内部审计**写入 `game_events`，不通过本接口返回，也不通过 WebSocket 推送（§12.10）。原因：命令原文可能包含游戏角色绑定码等一次性凭据（`/revolcast bind <code>`），一旦进入公开事件流，同服其他在线玩家可从前端看到并抢用。实现上由 `biz.GameEventQueryService` 统一向仓储传入排除条件（`event_type != player_command`），不依赖调用方自觉过滤；因此即使显式传入过滤参数，也无法查出该类型事件。业务链路见《Revolcast业务流程设计文档》§2.10。
 
 ### 13.5 主流程
 

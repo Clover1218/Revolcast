@@ -50,9 +50,15 @@ func (f *fakeQQBindStore) UnbindByUser(_ context.Context, _ int64) (int64, strin
 type fakeBindRateLimiter struct {
 	allowed bool
 	err     error
+
+	// calls / lastKey 用于断言「限流是否被调用」「限流键维度是否正确」。
+	calls   int
+	lastKey string
 }
 
-func (f *fakeBindRateLimiter) AllowAttempt(_ context.Context, _ string, _ time.Duration, _ int64) (bool, error) {
+func (f *fakeBindRateLimiter) AllowAttempt(_ context.Context, key string, _ time.Duration, _ int64) (bool, error) {
+	f.calls++
+	f.lastKey = key
 	return f.allowed, f.err
 }
 

@@ -47,6 +47,10 @@ ws:
   # 浏览器 WebSocket 握手的 Origin 白名单（生产环境必须配置，否则拒绝所有浏览器来源）
   # 例：["https://revolcast.cn", "https://www.revolcast.cn"]
   allowed_origins: []
+  # 游戏服务器在线状态采集（BIZ-012）：周期与单次回执超时（秒）。
+  # 状态快照 Redis TTL = 3 × 周期（默认 180s）。
+  status_poll_interval_seconds: 60
+  status_poll_timeout_seconds: 5
 
 # 业务队列（Worker Pool）：生产者-消费者模型，readPump 投递、业务 Handler 消费
 queue:

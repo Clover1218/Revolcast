@@ -32,6 +32,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -69,6 +71,27 @@ var (
 	reconnectWait = 1 * time.Second        // 重连前等待
 	messagePrefix = "loadtest"             // 聊天内容前缀，后面追加递增数字
 )
+
+// statusReplayPlayers 是假 RCON 回显中伪造的在线玩家，用于联调 BIZ-012 服务器状态查询。
+// 后端每 60s 下发一次 send_rcon_command: list uuids，本工具按此列表回一条英文原版格式的回显，
+// 于是 QQ 侧「revolcast server <code> status」就能看到这些人。改这里即可换人数。
+var statusReplayPlayers = []string{"Bot1", "Bot2", "Bot3"}
+
+// writeMu 保护底层连接的写操作：sendLoop 与 readPump（回执）都会写，gorilla 要求单写者。
+var writeMu sync.Mutex
+
+// buildListUUIDsEcho 按 statusReplayPlayers 构造与 MC 英文原版一致的 list uuids 回显。
+func buildListUUIDsEcho() string {
+	head := fmt.Sprintf("There are %d of a max of 20 players online:", len(statusReplayPlayers))
+	if len(statusReplayPlayers) == 0 {
+		return head
+	}
+	parts := make([]string, 0, len(statusReplayPlayers))
+	for i, name := range statusReplayPlayers {
+		parts = append(parts, fmt.Sprintf("%s (00000000-0000-0000-0000-%012d)", name, i+1))
+	}
+	return head + " " + strings.Join(parts, ", ")
+}
 
 // ===================== 事件结构（鹊桥原始 JSON） =====================
 
@@ -140,14 +163,50 @@ func dial() (*websocket.Conn, error) {
 	return conn, nil
 }
 
-// readPump 持续读取服务端消息（丢弃内容），同时让 gorilla 自动响应 ping/pong，
-// 保持连接健康并尽快感知断开。
+// readPump 持续读取服务端消息：对 send_rcon_command 回一条 RCON 回执（联调在线状态采集用），
+// 其余下行消息直接丢弃。同时让 gorilla 自动响应 ping/pong，保持连接健康并尽快感知断开。
 func readPump(conn *websocket.Conn) {
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		handleDownlink(conn, msg)
 	}
+}
+
+// handleDownlink 处理后端下行指令。当前只实现 `send_rcon_command`（BIZ-012 状态采集），
+// 回执格式见 docs/鹊桥与服务端WS连接格式详解.md「发送RCON命令」。
+func handleDownlink(conn *websocket.Conn, msg []byte) {
+	var req struct {
+		API  string `json:"api"`
+		Data struct {
+			Command string `json:"command"`
+		} `json:"data"`
+		Echo string `json:"echo"`
+	}
+	if err := json.Unmarshal(msg, &req); err != nil {
+		return
+	}
+	if req.API != "send_rcon_command" || req.Data.Command != "list uuids" {
+		return
+	}
+
+	resp, err := json.Marshal(map[string]any{
+		"code":      200,
+		"api":       req.API,
+		"post_type": "response",
+		"status":    "SUCCESS",
+		"message":   "success",
+		"data":      buildListUUIDsEcho(),
+		"echo":      req.Echo,
+	})
+	if err != nil {
+		return
+	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	_ = conn.WriteMessage(websocket.TextMessage, resp)
 }
 
 // sendLoop 以 sendInterval 为间隔持续发送递增聊天事件，直到 ctx 取消或写失败。
@@ -166,8 +225,11 @@ func sendLoop(ctx context.Context, conn *websocket.Conn, sent *int64) error {
 		if err != nil {
 			return err
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			return err
+		writeMu.Lock()
+		wErr := conn.WriteMessage(websocket.TextMessage, data)
+		writeMu.Unlock()
+		if wErr != nil {
+			return wErr
 		}
 		atomic.AddInt64(sent, 1)
 	}

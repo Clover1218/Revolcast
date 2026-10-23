@@ -14,6 +14,9 @@
 | BIZ-007 | 网站解绑 QQ | 网站 HTTP `POST /api/v1/user/unbind-QQ` | 仅凭会话 Cookie 将 `qq_bindings` 中当前有效绑定软解绑（`status` 1→0、记录 `unbound_at`） |
 | BIZ-008 | 列出可用服务器 | QQ 私聊 `revolcast server list` | 查询 `game_servers`（`status=1`）并渲染服务器列表，带 Redis 5 分钟缓存 |
 | BIZ-009 | 生成游戏角色绑定码 | QQ 私聊 `revolcast server <code> bind` | 校验服务器可用 → QQ 已绑定账号 → 无角色绑定 → 生成 `game_bind_codes` 待使用码并私聊返回 |
+| BIZ-010 | 游戏内绑定角色 | 游戏内 `/revolcast bind <code>`（鹊桥 `player_command` 事件） | 限流 → 原子消费绑定码 → 写入 `server_game_bindings`，游戏内私聊回执 |
+| BIZ-011 | 解除服务器角色绑定 | QQ 私聊 `revolcast server <code> unbind` | 校验服务器与 QQ 账号 → 软解绑 `server_game_bindings`（`status` 1→0、记录 `unbound_at`），QQ 回执 + 尽力而为的游戏内通知 |
+| BIZ-012 | 查询服务器在线状态 | QQ 私聊 `revolcast server <code> status`（数据由每台在线服务器每 60s 的 `list uuids` 采集） | 只读 Redis 快照 `revolcast:server:status:{server_code}`，返回在线人数与玩家昵称；**不查表、不触发即时采集** |
 
 > 命令格式（`revolcast ...`）与上表优先级（P0/P1）均为草案示例，落地前需评审确认。
 >
@@ -426,5 +429,162 @@
 
 - WS inbound：`event.qq.message.private`
 - WS outbound：`command.qq.send_private_message`
+
+---
+
+### 2.10 BIZ-010：游戏内绑定角色
+
+**触发端：** 游戏内命令 · **执行端：** Go Backend · **交付端：** 鹊桥（游戏内私聊）
+
+**业务目标**
+
+玩家在游戏内输入 `/revolcast bind <code>`，用 QQ 侧（BIZ-009）拿到的绑定码，把自己的游戏角色绑定到码所属的网站账号，形成 `server_game_bindings(status=1)`。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **接收事件** — 鹊桥上报 `sub_type=player_command`，Backend 派生 `event.game.player_command`；`server_id` 来自已鉴权 WS 连接 |
+| 02 | **落库审计** — 写入 `game_events`（保留 `command` 原文；该类型事件**不对外**，见「关键规则 5」） |
+| 03 | **命令识别** — `strings.Fields` 切词；首词 `revolcast`（兼容 `revolcast:bind` 命名空间形式）→ 子命令 `bind` → 取 1 个参数；其它命令静默丢弃 |
+| 04 | **码格式校验** — 去空白 + 转大写，长度 8 且属于字符集 `ABCDEFGHJKMNPQRSTUVWXYZ23456789`；不合法直接回「绑定码无效」（不查库、不计数） |
+| 05 | **玩家身份校验** — `player.uuid` 必须是合法 UUID、`player.nickname` 非空且 ≤ 64 字符 |
+| 06 | **限流（前置）** — Redis `revolcast:ratelimit:game:redeem:{server_id}:{player_uuid}`，5 分钟 5 次，`fail-open`；命中回「操作过于频繁」 |
+| 07 | **赎回事务** — 单事务内：服务器启用校验 → `SELECT ... FOR UPDATE` 锁码（含幂等重放判定）→ 账号状态 → 账号是否已绑定 → 角色是否被占用 → 消费码并回填 `game_name`/`game_uuid` → 写入 `server_game_bindings` |
+| 08 | **游戏内回执** — 通过鹊桥 `send_private_msg` 向该玩家下发结果文案 |
+
+**异常情况**
+
+- 码不存在 / 已过期 / 已被他人使用 / 不属于本服务器 / 格式非法 → 统一「绑定码无效或已过期」，不泄露码状态
+- 同一码 + 同一角色重复提交（消息重投 / 玩家重复输入）→ 幂等返回「绑定成功」，不重复写库
+- 账号在该服务器已有有效角色 → 回显角色名并说明「只能绑定一个角色」
+- 角色（UUID 或角色名，名字大小写不敏感）已被其他账号绑定 → 拒绝，不顶号
+- 服务器停用 → 「该服务器当前不可用」
+- 账号被禁用 → `ACCOUNT_DISABLED` 文案
+- 并发消费同一码 → 行锁串行化，后到者走幂等或「码无效」
+- 唯一索引冲突 → 整个事务回滚（**码状态恢复为待使用**），用户可换角色重试同一码
+
+**关键规则**
+
+1. **限流前置**：与 BIZ-009 的「限流后置」相反。发码是产生资源，只读幂等答案不该被限流挡住；兑换是**猜码**，每次尝试都必须计数。
+2. **先落库后处理业务**：游戏内命令属于审计对象，绑定逻辑失败也不能丢审计记录。
+3. **角色身份以事件为准**：`game_uuid` 取 `player.uuid`、`game_name` 取 `player.nickname`，由已鉴权服务器提供，不接受客户端自报。
+4. **绑定码是持有者凭证**：谁输入就把「谁的角色」绑到「码所属账号」。
+5. **`player_command` 不对外**：只落库供内部审计，不推 WS、不被 HTTP 事件查询返回（命令原文可能含绑定码）。
+
+**数据依赖**
+
+- 读：`game_servers`、`users`、`game_bind_codes`、`server_game_bindings`
+- 写：`game_bind_codes`（status 0→1 + `used_at`/`game_name`/`game_uuid`）、`server_game_bindings`（INSERT status=1）
+- 缓存：Redis `revolcast:ratelimit:game:redeem:{server_id}:{player_uuid}`
+
+**协议依赖**
+
+- WS inbound：`event.game.player_command`（裸 JSON，非 Envelope）
+- WS outbound：鹊桥 `send_private_msg`（裸 JSON，非 Envelope）
+
+---
+
+### 2.11 BIZ-011：解除服务器角色绑定
+
+**触发端：** QQ 私聊 · **执行端：** Go Backend · **交付端：** QQ Adapter（+ 尽力而为的游戏内通知）
+
+**业务目标**
+
+用户发送 `revolcast server <code> unbind`，解除「该 QQ 对应网站账号」在指定服务器的有效角色绑定，使其可重新绑定新的角色。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **命令识别** — 词序列 `server <code> unbind`（大小写/空白不敏感），`code` 转小写 |
+| 02 | **服务器解析** — `ResolveServer`（**不校验 `status`**）：格式非法 / 不存在统一回复「未找到该服务器」+ `server list` 指引 |
+| 03 | **QQ → 网站账号** — 查 `qq_bindings(status=1)`；无记录则引导先完成 QQ 绑定 |
+| 04 | **软解绑** — `UPDATE server_game_bindings SET status=0, unbound_at=now(), updated_at=now() WHERE server_id AND user_id AND status=1 RETURNING ...` |
+| 05 | **QQ 回执** — 成功时回显服务器名与角色名；无有效绑定回「无需解绑」 |
+| 06 | **游戏内通知（尽力而为）** — 若该服务器在线，向该角色发私聊「绑定已解除」；离线/发送失败只记日志 |
+
+**异常情况**
+
+- 服务器不存在 / code 格式非法 → `SERVER_NOT_FOUND` 口径文案（不区分，避免枚举）
+- QQ 未绑定账号 → `GameRoleUnbindOutcomeQQNotBound`，引导 `revolcast user bind`
+- 无有效绑定（含并发重复解绑）→ 「没有已绑定的角色，无需解绑」
+- 解绑 UPDATE 失败 → `ErrInternal`，不得误判为「无需解绑」
+
+**关键规则**
+
+1. **停用的服务器仍允许解绑**：解绑对已存在关系生效，若因服务器停用而禁止，用户的历史数据会被锁死；因此使用不判 `status` 的 `ResolveServer`，而订阅/发码仍走 `ResolveSubscribableServer`。
+2. **软解绑、保留历史**：仅 `status` 1→0 + `unbound_at`，不删除行（数据库文档 §3.7）。
+3. **不联动 `game_bind_codes`**：已使用的码保持 `status=1` 作为审计。
+4. **解绑不限流**：幂等、单行 UPDATE，且必须由已绑定该账号的 QQ 发起，风险低。
+5. **通知是附属效果**：解绑结果由数据库 UPDATE 决定，通知失败不回滚、不改文案。
+
+**数据依赖**
+
+- 读：`game_servers`、`qq_bindings`、`server_game_bindings`
+- 写：`server_game_bindings`（status 1→0）
+
+**协议依赖**
+
+- WS inbound：`event.qq.message.private`
+- WS outbound：`command.qq.send_private_message`
+- 鹊桥下行（可选）：`send_private_msg`
+
+---
+
+### 2.12 BIZ-012：查询服务器在线状态
+
+**触发端：** QQ 私聊 · **执行端：** Go Backend · **交付端：** QQ Adapter
+（数据来源：每台在线 MC 服务器的 WS 连接每 60s 主动采集一次，与用户查询解耦）
+
+**业务目标**
+
+用户发送 `revolcast server <code> status`，查看该服务器当前在线人数与玩家昵称。查询只读 Redis 快照，不查表、不触发即时采集。
+
+**主流程（查询）**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **命令识别** — 词序列 `server <code> status`（大小写/空白不敏感），`code` 转小写 |
+| 02 | **读快照** — 1 次 Redis GET `revolcast:server:status:{server_code}`（0 次查表） |
+| 03 | **渲染回执** — 命中：`当前服务器有 3 人：Bot1，Bot2，Bot3`；0 人：`当前服务器没有玩家在线。`；未命中：`未找到「code」的服务器状态…` |
+| 04 | **Redis 故障** — 回「状态查询暂时不可用」，**与「未找到」严格区分**（否则用户会误判服务器掉线） |
+
+**采集流程（无用户触发，每连接一条协程）**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | WS 连接建立（per-server secret 鉴权通过）后**立即**采集一次，此后每 60s 一次 |
+| 02 | 下行 `send_rcon_command`，`data.command = list uuids`，`echo = rcon:<唯一ID>` |
+| 03 | 回执按 `echo` 关联（**不进业务队列**），解析头部人数 + `昵称 (uuid)` 列表 |
+| 04 | 写 Redis 快照，TTL = 3 × 采集周期；解析失败 / 超时 / 回执异常一律**不覆盖**旧值 |
+| 05 | 连接注销 → 删除快照（失败由 TTL 兜底） |
+
+**异常情况**
+
+- 快照不存在（未连接 / 刚掉线 / 从未采集成功）→ 「未找到…请联系管理员」
+- 回显格式不符（服务端 locale 非英文、RCON 未启用、`data` 为空）→ 不写，旧值自然过期
+- 个别条目无法解析（昵称含半角逗号）→ 跳过该条，人数仍以头部数字为准
+- 回执超时（默认 5s）→ 放弃本次，等下一周期，不重试（避免超时放大）
+- Redis 读写失败 → 采集侧记日志丢弃；查询侧回「暂时不可用」
+
+**关键规则**
+
+1. **零查表**：键后缀用 `server_code` 而非 `server_id` —— WS 侧与 QQ 指令侧都只持有 code，读写两侧都不需要 code→id 映射。
+2. **失败不覆盖**：宁可让旧快照 TTL 过期，也不用坏样本清空玩家列表。
+3. **断连即删**：只有当前在线的服务器才有快照，「查不到」与「未连接」语义一致。
+4. **不加限流**：查询成本恒为一次 GET（与 BIZ-008 `server list` 同级）。
+5. **不落库**：状态是实时态数据，不写 PostgreSQL / MongoDB，也不进 `game_events` 审计流。
+
+**数据依赖**
+
+- 读 / 写：Redis `revolcast:server:status:{server_code}`（**无表操作**）
+
+**协议依赖**
+
+- 鹊桥下行：`send_rcon_command`（裸 JSON）+ `post_type=response` 回执（`data` 为字符串回显）
+- WS inbound / outbound（QQ）：`event.qq.message.private` / `command.qq.send_private_message`
+
+**详细设计**：`docs/服务器状态查询闭环方案.md`
 
 ---

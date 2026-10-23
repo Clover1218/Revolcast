@@ -49,6 +49,11 @@ type WSConfig struct {
 	// AllowedOrigins 是浏览器 WebSocket 握手的 Origin 白名单（如 https://revolcast.cn）。
 	// 为空时：开发环境放行，生产环境拒绝所有浏览器来源（fail-closed）。
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	// StatusPollIntervalSeconds 游戏服务器在线状态采集周期（秒），默认 60；
+	// 状态快照的 Redis TTL = 3 × 该值（见 biz.GameStatusService）。
+	StatusPollIntervalSeconds int `mapstructure:"status_poll_interval_seconds"`
+	// StatusPollTimeoutSeconds 单次等待 RCON 回执的上限（秒），默认 5。
+	StatusPollTimeoutSeconds int `mapstructure:"status_poll_timeout_seconds"`
 }
 
 type DatabaseConfig struct {
@@ -107,6 +112,8 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("ws.addr", ":8080")
 	v.SetDefault("ws.token", "123")
 	v.SetDefault("ws.allowed_origins", []string{})
+	v.SetDefault("ws.status_poll_interval_seconds", 60)
+	v.SetDefault("ws.status_poll_timeout_seconds", 5)
 	v.SetDefault("queue.workers", runtime.NumCPU())
 	v.SetDefault("queue.queue_size", 4096)
 	v.SetDefault("queue.enqueue_timeout_ms", 200)

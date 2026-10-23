@@ -32,6 +32,10 @@ type WSOptions struct {
 	HandshakeWindow  time.Duration
 	HandshakeUserMax int64
 	HandshakeIPMax   int64
+	// StatusPollInterval / StatusPollTimeout 是游戏服务器在线状态采集的周期与单次回执超时，
+	// 零值取默认（60s / 5s）。仅 /api/v1/game-servers/ws 使用，见 ws_game_server_status.go。
+	StatusPollInterval time.Duration
+	StatusPollTimeout  time.Duration
 }
 
 // withDefaults 为未配置的限流参数填默认值。
@@ -44,6 +48,12 @@ func (o WSOptions) withDefaults() WSOptions {
 	}
 	if o.HandshakeIPMax <= 0 {
 		o.HandshakeIPMax = wsHandshakeIPMax
+	}
+	if o.StatusPollInterval <= 0 {
+		o.StatusPollInterval = defaultStatusPollInterval
+	}
+	if o.StatusPollTimeout <= 0 {
+		o.StatusPollTimeout = defaultStatusPollTimeout
 	}
 	return o
 }
@@ -168,7 +178,9 @@ func ServeWS(hub *Hub, opts WSOptions, baseLogger *zap.Logger, clientType string
 //
 // 鉴权失败（secret 错误 / 服务器不存在 / 已停用 / DB 异常）一律返回 401，不向客户端区分具体成因，避免枚举与信息泄露。
 // 该路由不接受自声明的 client_id。
-func ServeGameServerWS(hub *Hub, auth GameServerAuth, opts WSOptions, baseLogger *zap.Logger) http.HandlerFunc {
+//
+// statusSink 为在线状态采集的落地端口（BIZ-012）；传 nil 则该连接不采集状态（便于单测）。
+func ServeGameServerWS(hub *Hub, auth GameServerAuth, statusSink ServerStatusSink, opts WSOptions, baseLogger *zap.Logger) http.HandlerFunc {
 	opts = opts.withDefaults()
 	upgrader := newUpgrader(newServerOriginChecker(opts.AllowedOrigins, opts.Production))
 	logger := baseLogger.With(zap.String("module", "WSGameServer"))
@@ -202,6 +214,7 @@ func ServeGameServerWS(hub *Hub, auth GameServerAuth, opts WSOptions, baseLogger
 			zap.String("client_type", string(ClientTypeGameServer)),
 			zap.Int64("server_id", serverID),
 			zap.String("remote_ip", r.RemoteAddr)))
+		client.enableStatusPolling(statusSink, opts.StatusPollInterval, opts.StatusPollTimeout)
 		hub.register <- client
 		client.start()
 	}

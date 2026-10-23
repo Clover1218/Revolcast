@@ -110,12 +110,45 @@ Type字段基本格式如下：
 
 | 字段 | 说明 |
 | :--- | :--- |
-| `type` | `event.game.player_join` / `player_quit` / `player_chat` / `player_command` |
+| `type` | `event.game.player_join` / `player_quit` / `player_chat`（`player_command` **不推送**，见下） |
 | `id` | **事件统一身份**：持久化文档 `_id` 的 24 位十六进制串。前端**唯一去重键**，与 HTTP 事件查询 `items[].id` 完全相同 |
 | `cursor` | 分页游标，由该事件的 `(received_at, _id)` 确定性生成，与 HTTP `items[].cursor` 完全相同；前端只保存与回传，**不解析**内部结构 |
 | `server_code` / `server_id` | 事件所属服务器（`server_id` 由服务端已鉴权身份派生，不可由 `server_name` 反查） |
 | `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339 **固定毫秒**格式（`2006-01-02T15:04:05.000Z`）；`received_at` 在落库前已截断到毫秒，与 MongoDB 存储、HTTP 事件查询（《HTTP 接口设计文档》§13）指向同一时刻 |
-| `data` | join/quit 为 `{}`；chat 为 `{message, raw_message, message_id}`；command 为 `{command, message_id}` |
+| `data` | join/quit 为 `{}`；chat 为 `{message, raw_message, message_id}` |
+
+**`player_command` 不进入公开事件流。** 玩家命令事件仅作为**内部审计**写入 `game_events`（保留 `command` 原文），既不通过本推送下发，也不被 HTTP 事件查询返回（《HTTP 接口设计文档》§13.4）。原因：`/revolcast bind <code>` 的原文包含游戏角色绑定码，属于一次性持有者凭据。业务处理见《Revolcast业务流程设计文档》§2.10；注意「不推送」不等于「不处理」——命令事件仍会触发绑定业务，并通过**鹊桥下行**给玩家回执。
+
+### 下行指令：`/api/v1/game-servers/ws`（Backend → 鹊桥）
+
+`/api/v1/game-servers/ws` 的对端是运行在 MC 服务端的鹊桥 mod，它**不认识统一 Envelope**：上行事件是裸 JSON（按 `sub_type` 派生 `event.game.<sub_type>`），下行指令同样是鹊桥原生裸 JSON。Envelope 只适用于 Adapter 与 Web 两个接入端。
+
+当前使用的下行 API：
+
+| API | 用途 | 触发业务 |
+| :--- | :--- | :--- |
+| `send_private_msg` | 向游戏内单个玩家发私聊（Minecraft 文本组件） | BIZ-010 绑定结果回执、BIZ-011 解绑通知 |
+| `send_rcon_command` | 在服务器内执行一条 RCON 命令（本期固定 `list uuids`） | BIZ-012 在线状态采集（每连接每 60s） |
+| `broadcast` | 服务器内广播 | 暂未使用 |
+
+```json
+{ "api": "send_private_msg",
+  "data": { "uuid": "a3b91ae7-9efd-3e2e-8907-3db4a6c53509", "nickname": "Clover",
+            "message": [{ "text": "✔ 绑定成功", "color": "green" }] },
+  "echo": "c0ffee..." }
+```
+
+```json
+{ "api": "send_rcon_command", "data": { "command": "list uuids" }, "echo": "rcon:..." }
+```
+
+- 发送方**只保证投递到该服务器的 WS 连接**（按已鉴权的 `server_id` 定位），不保证玩家收到；
+- 回执统一为 `post_type=response`，`echo` 原样返回，用于关联请求与回执。**等待策略按 API 区分**：
+  - `send_private_msg` / `broadcast`：**不等待**回执，仅按 `code`/`status` 记日志；通知失败不改变业务结论（绑定/解绑以数据库事务结果为准）。
+  - `send_rcon_command`：**等待**同 `echo` 的回执（默认 ≤5s），用于取命令回显（`data` 为字符串）。超时/失败只放弃本次采集，不重试。回执**不进入业务队列**，由发送方（状态采集协程）消费。
+- 注意 `data` 的类型随 API 变化：`send_private_msg` 为对象，`send_rcon_command` 为**字符串**，因此回执结构体以 `json.RawMessage` 承载 `data`，按 `api` 分别解码。
+
+详细协议见《鹊桥与服务端WS连接格式详解》「连接端 → 鹊桥」。
 
 - **数据来源单一**：`id` / `cursor` / `received_at` 全部取自同一条持久化记录（`InsertOne` 回传的 `_id` + 落库前已截断的 `received_at`），不在推送侧重新生成时间戳、ID 或游标。故同一条事件在 HTTP 与 WS 两侧身份完全一致。
 - **`trace_id` 不得代替事件 ID**：它只用于串联链路（例如把一次落库与一次推送日志关联），既不稳定也不唯一（同一条链路的多条消息共用），不能作为去重键。

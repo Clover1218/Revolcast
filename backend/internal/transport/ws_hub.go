@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"strconv"
 	"sync"
 
 	"revolcast-backend/internal/queue"
@@ -12,7 +13,10 @@ import (
 //
 // 三类接入端分别维护自己的索引，避免不同接入端的标识互相冲突：
 //   - Adapter：    client_id          -> 连接（同一 client_id 只保留一个有效连接）
-//   - GameServer： server_code        -> 连接（同一服务器只保留一个有效连接）
+//   - GameServer： server_code + server_id -> 连接（同一服务器只保留一个有效连接）
+//
+// GameServer 同时维护两份索引：server_code 用于「按 code 定位登录态」类日志与展示，
+// server_id 用于业务下发（事件的已鉴权归属是 server_id，绑定/解绑通知按它找连接）。
 //   - Web：        connection_id      -> 连接，并额外维护 user_id / server_code 两个反向索引
 //
 // 注意：Web 连接的标识是服务端生成的 connection_id，Session Token 只用于握手鉴权，
@@ -27,6 +31,9 @@ type Hub struct {
 
 	adapters    map[string]*AdapterClient    // client_id -> 连接
 	gameServers map[string]*GameServerClient // server_code -> 连接
+	// gameServersByID 是 game_servers.id -> 连接的索引：业务下行（游戏内私聊通知）只拿得到
+	// 已鉴权的 server_id，不能依赖 server_name 反查 code。
+	gameServersByID map[int64]*GameServerClient
 
 	webByConn   map[string]*WebClient            // connection_id -> 连接
 	webByUser   map[int64]map[string]*WebClient  // user_id -> connection_id -> 连接（按用户推送）
@@ -40,15 +47,16 @@ type Hub struct {
 
 func NewHub(logger *zap.Logger) *Hub {
 	return &Hub{
-		logger:      logger.With(zap.String("module", "WSHub")),
-		register:    make(chan Conn),
-		unregister:  make(chan Conn),
-		adapters:    make(map[string]*AdapterClient),
-		gameServers: make(map[string]*GameServerClient),
-		webByConn:   make(map[string]*WebClient),
-		webByUser:   make(map[int64]map[string]*WebClient),
-		webByServer: make(map[string]map[string]*WebClient),
-		webCodeByID: make(map[int64]string),
+		logger:          logger.With(zap.String("module", "WSHub")),
+		register:        make(chan Conn),
+		unregister:      make(chan Conn),
+		adapters:        make(map[string]*AdapterClient),
+		gameServers:     make(map[string]*GameServerClient),
+		webByConn:       make(map[string]*WebClient),
+		webByUser:       make(map[int64]map[string]*WebClient),
+		webByServer:     make(map[string]map[string]*WebClient),
+		webCodeByID:     make(map[int64]string),
+		gameServersByID: make(map[int64]*GameServerClient),
 	}
 }
 
@@ -86,6 +94,7 @@ func (h *Hub) registerConn(c Conn) {
 			h.evictLocked(old)
 		}
 		h.gameServers[v.serverCode] = v
+		h.gameServersByID[v.serverID] = v
 	case *WebClient:
 		h.addWebLocked(v)
 	default:
@@ -111,6 +120,9 @@ func (h *Hub) unregisterConn(c Conn) {
 	case *GameServerClient:
 		if h.gameServers[v.serverCode] == v {
 			delete(h.gameServers, v.serverCode)
+		}
+		if h.gameServersByID[v.serverID] == v {
+			delete(h.gameServersByID, v.serverID)
 		}
 	case *WebClient:
 		h.removeWebLocked(v)
@@ -176,13 +188,27 @@ func (h *Hub) evictLocked(c Conn) {
 
 // SendToClient 向指定 client_id 的接入端回传 Action / 指令（非阻塞）。
 // 返回 false 表示该接入端不在线或发送队列已满；调用方（Worker）不应因此阻塞。
-// 查找顺序为 Adapter -> GameServer，覆盖「按接入端身份回传」的既有语义。
+//
+// 查找顺序为 Adapter -> GameServer。游戏服务器的业务标识是 game_servers.id
+// （解析为十进制整数后按 id 索引查找），不能直接用它匹配 server_code 键。
 func (h *Hub) SendToClient(clientID string, data []byte) bool {
 	if h.SendToAdapter(clientID, data) {
 		return true
 	}
+	if id, err := strconv.ParseInt(clientID, 10, 64); err == nil {
+		return h.SendToGameServerByID(id, data)
+	}
+	return false
+}
+
+// SendToGameServerByID 向指定游戏服务器（game_servers.id）下发数据（非阻塞）。
+//
+// 这是游戏内下行通知的唯一出口（见 ws_push / game_notice）：业务侧只持有事件的已鉴权
+// server_id，不持有 server_code，也不应通过 server_name 反查。
+// 返回 false 表示该服务器当前无在线连接或发送队列已满，调用方只记日志、不重试。
+func (h *Hub) SendToGameServerByID(serverID int64, data []byte) bool {
 	h.mu.RLock()
-	gs, ok := h.gameServers[clientID]
+	gs, ok := h.gameServersByID[serverID]
 	h.mu.RUnlock()
 	if !ok {
 		return false
@@ -266,6 +292,7 @@ func (h *Hub) CloseAll() {
 	}
 	h.adapters = make(map[string]*AdapterClient)
 	h.gameServers = make(map[string]*GameServerClient)
+	h.gameServersByID = make(map[int64]*GameServerClient)
 	h.webByConn = make(map[string]*WebClient)
 	h.webByUser = make(map[int64]map[string]*WebClient)
 	h.webByServer = make(map[string]map[string]*WebClient)

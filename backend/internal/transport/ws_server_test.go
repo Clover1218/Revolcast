@@ -349,7 +349,7 @@ func TestServeGameServerWS_Success(t *testing.T) {
 	defer hub.CloseAll()
 
 	auth := &fakeGameServerAuth{serverID: 42, serverCode: "survival"}
-	srv := httptest.NewServer(ServeGameServerWS(hub, auth, WSOptions{}, zap.NewNop()))
+	srv := httptest.NewServer(ServeGameServerWS(hub, auth, nil, WSOptions{}, zap.NewNop()))
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "?token=raw-secret&client_id=evil-server"
@@ -396,7 +396,7 @@ func TestServeGameServerWS_Unauthorized(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(ServeGameServerWS(hub, tc.auth, WSOptions{}, zap.NewNop()))
+			srv := httptest.NewServer(ServeGameServerWS(hub, tc.auth, nil, WSOptions{}, zap.NewNop()))
 			defer srv.Close()
 
 			resp, err := http.Get(srv.URL + "?token=wrong")
@@ -418,7 +418,7 @@ func TestServeGameServerWS_MissingToken(t *testing.T) {
 	defer hub.CloseAll()
 
 	auth := &fakeGameServerAuth{serverID: 1, serverCode: "s"}
-	srv := httptest.NewServer(ServeGameServerWS(hub, auth, WSOptions{}, zap.NewNop()))
+	srv := httptest.NewServer(ServeGameServerWS(hub, auth, nil, WSOptions{}, zap.NewNop()))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL)

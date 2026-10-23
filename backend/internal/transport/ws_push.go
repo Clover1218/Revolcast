@@ -38,6 +38,14 @@ func buildGameEventPush(traceID string, view *biz.GameEventView, serverCode stri
 	return json.Marshal(env)
 }
 
+// isEventPubliclyVisible 判断事件类型是否可进入公开事件流（WebSocket 推送使用）。
+//
+// 与 biz.GameEventQueryService 的 ExcludeEventTypes 保持同一策略：player_command 只做内部审计。
+// 两处必须同时为真，否则会出现「HTTP 能查到但推送收不到」这类不对称行为。
+func isEventPubliclyVisible(eventType string) bool {
+	return eventType != protocol.SubTypePlayerCommand
+}
+
 // buildGameEventPushData 按事件类型填充推送内容（与落库 data 子文档同源，但只下发前端需要的字段）：
 //   - join/quit: 空对象
 //   - chat:      message / raw_message（文本组件 JSON）/ message_id
@@ -65,6 +73,13 @@ func buildGameEventPushData(view *biz.GameEventView) protocol.GameEventPushData 
 // 不广播给其他服务器的 Web 连接；单个连接队列满只丢弃该连接，不影响落库结果与其他人。
 func pushGameEventToWeb(hub *Hub, traceID string, view *biz.GameEventView, logger *zap.Logger) {
 	if view == nil {
+		return
+	}
+
+	// player_command 属于**内部审计事件**：命令原文可能包含绑定码等敏感参数，
+	// 因此不进入公开事件流（既不推 WS，也不被 HTTP 查询返回，见 game_event_query.go）。
+	// 落库仍然保留完整原文，供内部排查。规则见《游戏角色绑定与解绑闭环方案》§8。
+	if !isEventPubliclyVisible(view.EventType) {
 		return
 	}
 

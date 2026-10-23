@@ -76,6 +76,12 @@ func main() {
 	// 游戏事件入库业务（game_events）：消费 WS 上行事件并写入 MongoDB 审计日志。
 	gameEventSvc := biz.NewGameEventService(gameEventRepo)
 
+	// 服务器在线状态（BIZ-012）：按采集周期推导 TTL（3 × 周期），只存 Redis（可随时重建）。
+	// 采集动作由 WS 连接层（transport）按定时器触发，本服务只负责解析落地与查询。
+	gameStatusSvc := biz.NewGameStatusService(redisRepo, biz.GameStatusConfig{
+		PollInterval: time.Duration(cfg.WS.StatusPollIntervalSeconds) * time.Second,
+	})
+
 	// HTTP 鉴权接口（BIZ-002 / BIZ-003 / BIZ-004）：复用同一份 DB/Redis/Logger。
 	userRepo := repository.NewUserRepo(PostgreSQL)
 	sessionRepo := repository.NewSessionRepo(PostgreSQL)
@@ -92,21 +98,26 @@ func main() {
 	gameServerRepo := repository.NewGameServerRepo(PostgreSQL)
 	gameServerSvc := biz.NewGameServerService(gameServerRepo, redisRepo, redisRepo, biz.GameServerConfig{})
 
-	// 游戏角色绑定业务（BIZ-008 列服务器 / BIZ-009 发绑定码）：
-	// qq_bindings 取「QQ → 网站账号」，server_game_bindings 判「账号 → 角色」，game_bind_codes 存取待使用码。
+	// 游戏角色绑定业务（BIZ-008 列服务器 / BIZ-009 发绑定码 / BIZ-010 游戏内绑定 / BIZ-011 QQ 解绑）：
+	// qq_bindings 取「QQ → 网站账号」，server_game_bindings 既判「账号 → 角色」也负责赎回写入，
+	// game_bind_codes 存取待使用码。serverGameBindingRepo 同时作为只读查询与写入端口注入。
 	gameBindCodeRepo := repository.NewGameBindCodeRepo(PostgreSQL)
 	serverGameBindingRepo := repository.NewServerGameBindingRepo(PostgreSQL)
 	gameBindSvc := biz.NewGameBindService(
-		gameServerSvc, userRepo, pgRepo, serverGameBindingRepo, gameBindCodeRepo, redisRepo,
+		gameServerSvc, userRepo, pgRepo, serverGameBindingRepo, gameBindCodeRepo,
+		serverGameBindingRepo, redisRepo,
 		biz.GameBindConfig{},
 	)
+
+	// 游戏内私聊通知的唯一出口（绑定结果、解绑提示）；绑定/解绑的业务成败不依赖它。
+	gameNotifier := transport.NewGameNotifier(hub, baseLogger)
 
 	pool := queue.NewPool(rootCtx, queue.Config{
 		Workers:        cfg.Queue.Workers,
 		QueueSize:      cfg.Queue.QueueSize,
 		EnqueueTimeout: time.Duration(cfg.Queue.EnqueueTimeout) * time.Millisecond,
 		TaskTimeout:    time.Duration(cfg.Queue.TaskTimeout) * time.Millisecond,
-	}, transport.NewBizHandler(hub, baseLogger, bindSvc, gameBindSvc, gameEventSvc), baseLogger)
+	}, transport.NewBizHandler(hub, baseLogger, bindSvc, gameBindSvc, gameStatusSvc, gameEventSvc, gameNotifier), baseLogger)
 	hub.SetPool(pool)
 	go hub.Run()
 
@@ -119,12 +130,16 @@ func main() {
 		Token:          cfg.WS.Token,
 		AllowedOrigins: cfg.WS.AllowedOrigins,
 		Production:     cfg.App.Env == "production",
+		// 状态采集参数（BIZ-012）：0 时由 transport 取默认 60s / 5s。
+		StatusPollInterval: time.Duration(cfg.WS.StatusPollIntervalSeconds) * time.Second,
+		StatusPollTimeout:  time.Duration(cfg.WS.StatusPollTimeoutSeconds) * time.Second,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/adapter/ws", transport.ServeWS(hub, wsOpts, baseLogger, "adapter"))
 	// 游戏服务器接入：以 per-server API Secret 鉴权，连接标识为 server_code（见 ServeGameServerWS）。
-	mux.HandleFunc("/api/v1/game-servers/ws", transport.ServeGameServerWS(hub, gameServerSvc, wsOpts, baseLogger))
+	// statusSvc 同时是状态采集的落地端口：连接建立后每 60s 下发一次 list uuids。
+	mux.HandleFunc("/api/v1/game-servers/ws", transport.ServeGameServerWS(hub, gameServerSvc, gameStatusSvc, wsOpts, baseLogger))
 	// 前端订阅单个服务器的游戏事件：Session Cookie 鉴权 + 握手限流 + server_code 校验（见 ServeWebWS）。
 	mux.HandleFunc("/api/v1/game-servers/{server_code}/ws",
 		transport.ServeWebWS(hub, authSvc, gameServerSvc, redisRepo, wsOpts, baseLogger))

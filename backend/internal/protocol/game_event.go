@@ -45,6 +45,15 @@ const (
 	TypeGamePlayerCommand = "event.game.player_command"
 )
 
+// 原始 sub_type 值（即 game_events.event_type 与推送 payload.event_type 的取值）。
+// 与上面的 task.Type 不同：task.Type 带 "event.game." 前缀，这里是裸事件类型。
+const (
+	SubTypePlayerJoin    = "player_join"
+	SubTypePlayerQuit    = "player_quit"
+	SubTypePlayerChat    = "player_chat"
+	SubTypePlayerCommand = "player_command"
+)
+
 // GameEventPushPayload 是「游戏事件落库成功后推送给 Web 端（已登录用户）」的 Envelope.Payload。
 //
 // 与鹊桥原始事件的差异：
