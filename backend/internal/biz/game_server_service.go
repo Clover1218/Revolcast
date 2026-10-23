@@ -28,6 +28,11 @@ const (
 
 	// serverSecretBytes 原始 API Secret 的随机字节数（hex 后为 64 字符）。
 	serverSecretBytes = 32
+
+	// serverListCacheTTL 「可用服务器列表」缓存有效期（5 分钟）。
+	serverListCacheTTL = 5 * time.Minute
+	// serverListLimit 单次从库中拉取的可用服务器上限（整份列表进缓存）。
+	serverListLimit = 100
 )
 
 // serverCodeRegexp 服务器标识（code）字符集：小写字母、数字、连字符，与数据库 CHECK 约束一致。
@@ -49,6 +54,23 @@ type ServerRateLimiter interface {
 	AllowAttempt(ctx context.Context, key string, window time.Duration, max int64) (bool, error)
 }
 
+// ServerCache 是 GameServerService 对缓存读写的依赖（便于测试注入 fake）。
+// 缓存只承载「可用服务器列表」这一可重建的展示数据，**不作为权威配置**：
+// 任何一致性要求高的判定（如发绑定码前校验服务器是否启用）都必须回源数据库。
+type ServerCache interface {
+	GetCache(ctx context.Context, key string, dest any) (hit bool, err error)
+	SetCache(ctx context.Context, key string, val any, ttl time.Duration) error
+	DelCache(ctx context.Context, keys ...string) error
+}
+
+// AvailableServer 是「可用服务器」（status=1）的对外摘要，供 QQ 指令展示。
+// Description 已把 NULL 拍平为空字符串，避免调用方反复判空。
+type AvailableServer struct {
+	Code        string
+	Name        string
+	Description string
+}
+
 // ServerSecretGenerator 生成 API Secret 原始串及其 SHA-256 哈希（原始串仅一次性下发）。
 type ServerSecretGenerator interface {
 	GenerateSecret() (raw, hash string, err error)
@@ -61,6 +83,10 @@ type GameServerConfig struct {
 	ReadRateLimitWindow   time.Duration
 	ReadRateLimitMax      int64
 	SecretBytes           int
+	// AvailableCacheTTL 「可用服务器列表」缓存有效期，默认 5 分钟。
+	AvailableCacheTTL time.Duration
+	// AvailableListLimit 单次拉取的可用服务器上限，默认 100（缓存整份列表，展示层再截断）。
+	AvailableListLimit int
 }
 
 // GameServerService 实现 game_servers 的增删改查与密钥生命周期。
@@ -71,11 +97,12 @@ type GameServerConfig struct {
 type GameServerService struct {
 	store  GameServerStore
 	rl     ServerRateLimiter
+	cache  ServerCache
 	secret ServerSecretGenerator
 	cfg    GameServerConfig
 }
 
-func NewGameServerService(store GameServerStore, rl ServerRateLimiter, cfg GameServerConfig) *GameServerService {
+func NewGameServerService(store GameServerStore, rl ServerRateLimiter, cache ServerCache, cfg GameServerConfig) *GameServerService {
 	if cfg.ManageRateLimitWindow <= 0 {
 		cfg.ManageRateLimitWindow = serverManageRateLimitWindow
 	}
@@ -91,9 +118,16 @@ func NewGameServerService(store GameServerStore, rl ServerRateLimiter, cfg GameS
 	if cfg.SecretBytes <= 0 {
 		cfg.SecretBytes = serverSecretBytes
 	}
+	if cfg.AvailableCacheTTL <= 0 {
+		cfg.AvailableCacheTTL = serverListCacheTTL
+	}
+	if cfg.AvailableListLimit <= 0 {
+		cfg.AvailableListLimit = serverListLimit
+	}
 	return &GameServerService{
 		store:  store,
 		rl:     rl,
+		cache:  cache,
 		secret: defaultServerSecretGenerator{bytes: cfg.SecretBytes},
 		cfg:    cfg,
 	}
@@ -146,6 +180,7 @@ func (s *GameServerService) Create(ctx context.Context, actorKey, code, name, de
 		}
 		return nil, "", Wrap(ErrInternal, cErr, "创建游戏服务器失败")
 	}
+	s.invalidateAvailableCache(ctx)
 	return rec, raw, nil
 }
 
@@ -204,6 +239,60 @@ func (s *GameServerService) List(ctx context.Context, actorKey string, statusFil
 	return recs, nil
 }
 
+// ListAvailable 返回全部「可用」服务器（status=1，启用），带 Redis 缓存（默认 5 分钟）。
+//
+// 缓存策略（Cache-Aside）：
+//   - 命中：直接返回缓存值，不查库；
+//   - 未命中 / Redis 故障 / 缓存值损坏：回源查库，成功后再覆盖写入缓存（失败仅忽略，由 TTL 兜底）。
+//
+// 失败策略：Redis 是加速层，任何缓存异常都 **fail-open**（退化为直接查库），绝不因缓存故障阻断业务。
+//
+// 不做限流：本方法只服务「列服务器」这类读多写极少的场景，命中缓存时成本≈一次 GET；
+// 公开 HTTP 列表接口仍走 List（按 IP 限流），二者互不影响。
+//
+// 注意：返回的是展示用快照，存在最长 AvailableCacheTTL 的滞后。
+// 任何「该服务器此刻是否可绑定」的判定必须走 ResolveSubscribableServer（直查库），不要复用本方法。
+func (s *GameServerService) ListAvailable(ctx context.Context) ([]AvailableServer, error) {
+	if s.cache != nil {
+		var cached []AvailableServer
+		if hit, err := s.cache.GetCache(ctx, repository.GameServerListCacheKey, &cached); err == nil && hit {
+			return cached, nil
+		}
+	}
+
+	enabled := int16(1)
+	recs, err := s.store.ListGameServers(ctx, &enabled, s.cfg.AvailableListLimit, 0)
+	if err != nil {
+		return nil, Wrap(ErrInternal, err, "查询可用服务器列表失败")
+	}
+
+	out := make([]AvailableServer, 0, len(recs))
+	for _, rec := range recs {
+		item := AvailableServer{Code: rec.Code, Name: rec.Name}
+		if rec.Description != nil {
+			item.Description = *rec.Description
+		}
+		out = append(out, item)
+	}
+
+	if s.cache != nil {
+		// 写入失败仅忽略：本次已有正确结果，缓存缺失由 TTL/下次请求自然修复。
+		_ = s.cache.SetCache(ctx, repository.GameServerListCacheKey, out, s.cfg.AvailableCacheTTL)
+	}
+	return out, nil
+}
+
+// invalidateAvailableCache 在服务器配置变更后失效「可用服务器列表」缓存。
+//
+// 失败仅忽略：TTL（默认 5 分钟）会自动兜底，最坏表现是短暂展示旧列表；
+// 因此不在业务成功路径上因缓存失效失败而回滚或报错。
+func (s *GameServerService) invalidateAvailableCache(ctx context.Context) {
+	if s.cache == nil {
+		return
+	}
+	_ = s.cache.DelCache(ctx, repository.GameServerListCacheKey)
+}
+
 // GetByCode 按 code 查询单个服务器（公开读）。actorKey 取客户端 IP。
 func (s *GameServerService) GetByCode(ctx context.Context, actorKey, code string) (*repository.GameServerRecord, error) {
 	allowed, rlErr := s.rl.AllowAttempt(ctx, repository.ServerRateLimitKey("read", actorKey), s.cfg.ReadRateLimitWindow, s.cfg.ReadRateLimitMax)
@@ -255,6 +344,8 @@ func (s *GameServerService) Update(ctx context.Context, actorKey, code string, u
 		}
 		return nil, Wrap(ErrInternal, err, "更新游戏服务器失败")
 	}
+	// name / description / status 都可能影响列表展示，一律失效缓存。
+	s.invalidateAvailableCache(ctx)
 	return rec, nil
 }
 
@@ -278,6 +369,8 @@ func (s *GameServerService) Disable(ctx context.Context, actorKey, code string) 
 		}
 		return nil, Wrap(ErrInternal, err, "禁用游戏服务器失败")
 	}
+	// 停用后必须立刻从「可用服务器」缓存中消失（否则最长 5 分钟内仍会被列出）。
+	s.invalidateAvailableCache(ctx)
 	return rec, nil
 }
 

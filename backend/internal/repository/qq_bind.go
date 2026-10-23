@@ -38,18 +38,39 @@ func NewQQBindRepo(pool *pgxpool.Pool) *QQBindRepo {
 	return &QQBindRepo{pool: pool}
 }
 
-// IsQQActiveBound 判断指定 qq_uin 是否存在有效（status=1）绑定。
-func (r *QQBindRepo) IsQQActiveBound(ctx context.Context, qqUIN int64) (bool, error) {
-	const q = `SELECT 1 FROM qq_bindings WHERE qq_uin = $1 AND status = 1 LIMIT 1`
-	var dummy int
-	err := r.pool.QueryRow(ctx, q, qqUIN).Scan(&dummy)
+// QQBindingInfo 是 qq_bindings 中一条有效（status=1）绑定的快照。
+type QQBindingInfo struct {
+	UserID int64  // 绑定的网站账号
+	QQUIN  int64  // QQ 号
+	BotID  string // 建立该绑定的机器人 ID（审计用）
+}
+
+// GetActiveQQBinding 查询指定 qq_uin 的有效（status=1）绑定。
+// 无记录返回 (nil, nil)：调用方据 nil 判定「该 QQ 尚未绑定网站账号」。
+//
+// 依赖部分唯一索引 ux_qq_bindings_active_qq，最多一行；仍带 LIMIT 1 兜底。
+func (r *QQBindRepo) GetActiveQQBinding(ctx context.Context, qqUIN int64) (*QQBindingInfo, error) {
+	const q = `SELECT user_id, bot_id FROM qq_bindings WHERE qq_uin = $1 AND status = 1 LIMIT 1`
+	var info QQBindingInfo
+	info.QQUIN = qqUIN
+	err := r.pool.QueryRow(ctx, q, qqUIN).Scan(&info.UserID, &info.BotID)
 	if err == pgx.ErrNoRows {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("查询 QQ 绑定状态失败: %w", err)
+		return nil, fmt.Errorf("查询 QQ 绑定状态失败: %w", err)
 	}
-	return true, nil
+	return &info, nil
+}
+
+// IsQQActiveBound 判断指定 qq_uin 是否存在有效（status=1）绑定。
+// 与 GetActiveQQBinding 共用同一条查询，避免两处 SQL 口径漂移。
+func (r *QQBindRepo) IsQQActiveBound(ctx context.Context, qqUIN int64) (bool, error) {
+	info, err := r.GetActiveQQBinding(ctx, qqUIN)
+	if err != nil {
+		return false, err
+	}
+	return info != nil, nil
 }
 
 // GetPendingBindCode 返回该 qq_uin 当前未过期、待使用（status=0 且 expires_at>now）的绑定码。

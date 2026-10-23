@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -20,6 +21,8 @@ type fakeGameServerStore struct {
 	createHash     string // 记录入库时收到的 api_secret_hash
 	list           []*repository.GameServerRecord
 	listErr        error
+	listCalls      int    // 记录 ListGameServers 被调用次数（用于断言缓存命中）
+	lastStatusFltr *int16 // 记录列表查询使用的 status 过滤条件
 	byCode         *repository.GameServerRecord
 	getErr         error
 	bySecretHash   *repository.GameServerRecord
@@ -48,7 +51,9 @@ func (f *fakeGameServerStore) CreateGameServer(_ context.Context, code, name, de
 	return rec, nil
 }
 
-func (f *fakeGameServerStore) ListGameServers(_ context.Context, _ *int16, _ int, _ int) ([]*repository.GameServerRecord, error) {
+func (f *fakeGameServerStore) ListGameServers(_ context.Context, statusFilter *int16, _ int, _ int) ([]*repository.GameServerRecord, error) {
+	f.listCalls++
+	f.lastStatusFltr = statusFilter
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -112,9 +117,63 @@ func (f fakeServerSecretGenerator) GenerateSecret() (string, string, error) {
 	return f.raw, f.hash, f.err
 }
 
+// fakeServerCache 是内存版 ServerCache，用于断言命中/回填/失效行为。
+type fakeServerCache struct {
+	data   map[string][]byte
+	getErr error
+	setErr error
+	delErr error
+	gets   int
+	sets   int
+	dels   int
+}
+
+func newFakeServerCache() *fakeServerCache {
+	return &fakeServerCache{data: map[string][]byte{}}
+}
+
+func (f *fakeServerCache) GetCache(_ context.Context, key string, dest any) (bool, error) {
+	f.gets++
+	if f.getErr != nil {
+		return false, f.getErr
+	}
+	raw, ok := f.data[key]
+	if !ok {
+		return false, nil
+	}
+	if err := json.Unmarshal(raw, dest); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (f *fakeServerCache) SetCache(_ context.Context, key string, val any, _ time.Duration) error {
+	f.sets++
+	if f.setErr != nil {
+		return f.setErr
+	}
+	raw, err := json.Marshal(val)
+	if err != nil {
+		return err
+	}
+	f.data[key] = raw
+	return nil
+}
+
+func (f *fakeServerCache) DelCache(_ context.Context, keys ...string) error {
+	f.dels++
+	if f.delErr != nil {
+		return f.delErr
+	}
+	for _, k := range keys {
+		delete(f.data, k)
+	}
+	return nil
+}
+
 // newGameServerService 组装测试实例，注入默认 fake。
 func newGameServerService(store *fakeGameServerStore, rl *fakeServerRateLimiter) *GameServerService {
-	svc := NewGameServerService(store, rl, GameServerConfig{})
+	svc := NewGameServerService(store, rl, newFakeServerCache(), GameServerConfig{})
 	// 用可控密钥生成器替换默认（defaultServerSecretGenerator），便于断言。
 	svc.secret = fakeServerSecretGenerator{raw: "raw-secret-plain", hash: "deadbeefhash"}
 	return svc
@@ -413,5 +472,142 @@ func TestResolveSubscribableServer_StoreError(t *testing.T) {
 	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
 	if _, err := svc.ResolveSubscribableServer(context.Background(), "survival"); !errors.Is(err, ErrInternal) {
 		t.Fatalf("期望 ErrInternal，实际 %v", err)
+	}
+}
+
+// ---- ListAvailable（BIZ-008 可用服务器列表 + 缓存）----
+
+// TestListAvailable_CacheMissThenHit 首次回源查库并回填缓存，第二次直接命中缓存（不再查库）。
+func TestListAvailable_CacheMissThenHit(t *testing.T) {
+	desc := "转生成魔法师拯救世界"
+	store := &fakeGameServerStore{list: []*repository.GameServerRecord{
+		{ID: 1, Code: "element", Name: "元素觉醒", Description: &desc, Status: 1},
+		{ID: 2, Code: "afop", Name: "宁然一隅", Status: 1}, // Description=nil 应拍平为空串
+	}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	cache := svc.cache.(*fakeServerCache)
+
+	first, err := svc.ListAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("期望查询成功，实际 %v", err)
+	}
+	if len(first) != 2 || first[0].Code != "element" || first[0].Description != desc {
+		t.Fatalf("列表内容不符: %+v", first)
+	}
+	if first[1].Description != "" {
+		t.Fatalf("NULL 简介应拍平为空串，实际 %q", first[1].Description)
+	}
+	if store.listCalls != 1 || cache.sets != 1 {
+		t.Fatalf("首次应查库 1 次并写缓存 1 次，实际 list=%d set=%d", store.listCalls, cache.sets)
+	}
+	// 只允许 status=1（启用）的服务器进入「可用」列表。
+	if store.lastStatusFltr == nil || *store.lastStatusFltr != 1 {
+		t.Fatalf("期望按 status=1 过滤，实际 %v", store.lastStatusFltr)
+	}
+
+	second, err := svc.ListAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("第二次期望命中缓存，实际 %v", err)
+	}
+	if len(second) != 2 {
+		t.Fatalf("缓存结果条数不符: %+v", second)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("命中缓存后不应再查库，实际查库 %d 次", store.listCalls)
+	}
+}
+
+// TestListAvailable_CacheFailureFailOpen Redis 故障时退化为直接查库，不阻断业务。
+func TestListAvailable_CacheFailureFailOpen(t *testing.T) {
+	store := &fakeGameServerStore{list: []*repository.GameServerRecord{{ID: 1, Code: "element", Name: "元素觉醒", Status: 1}}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	cache := svc.cache.(*fakeServerCache)
+	cache.getErr = errors.New("redis down")
+	cache.setErr = errors.New("redis down")
+
+	list, err := svc.ListAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("缓存故障应 fail-open，实际 %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("期望回源得到 1 条，实际 %d", len(list))
+	}
+}
+
+// TestListAvailable_StoreError 查库失败映射为 ErrInternal（含根因）。
+func TestListAvailable_StoreError(t *testing.T) {
+	store := &fakeGameServerStore{listErr: errors.New("pg down")}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	_, err := svc.ListAvailable(context.Background())
+	if !errors.Is(err, ErrInternal) {
+		t.Fatalf("期望 ErrInternal，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "pg down") {
+		t.Fatalf("期望错误链包含根因，实际 %v", err)
+	}
+}
+
+// TestListAvailable_Empty 无启用服务器时返回空切片（不是 nil，便于上层判断）。
+func TestListAvailable_Empty(t *testing.T) {
+	store := &fakeGameServerStore{list: []*repository.GameServerRecord{}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	list, err := svc.ListAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("期望成功，实际 %v", err)
+	}
+	if list == nil || len(list) != 0 {
+		t.Fatalf("期望空切片，实际 %#v", list)
+	}
+}
+
+// ---- 缓存失效：Create / Update / Disable 成功后必须 DEL 列表缓存 ----
+
+func TestGameServerCreate_InvalidatesCache(t *testing.T) {
+	store := &fakeGameServerStore{created: &repository.GameServerRecord{ID: 1, Code: "a", Name: "A", Status: 1}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	cache := svc.cache.(*fakeServerCache)
+
+	if _, _, err := svc.Create(context.Background(), "1.2.3.4", "a", "A", ""); err != nil {
+		t.Fatalf("期望创建成功，实际 %v", err)
+	}
+	if cache.dels != 1 {
+		t.Fatalf("期望失效缓存 1 次，实际 %d", cache.dels)
+	}
+}
+
+func TestGameServerUpdate_InvalidatesCache(t *testing.T) {
+	store := &fakeGameServerStore{updated: &repository.GameServerRecord{ID: 1, Code: "a", Name: "A", Status: 1}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	cache := svc.cache.(*fakeServerCache)
+
+	if _, err := svc.Update(context.Background(), "1.2.3.4", "a", repository.GameServerUpdate{}); err != nil {
+		t.Fatalf("期望更新成功，实际 %v", err)
+	}
+	if cache.dels != 1 {
+		t.Fatalf("期望失效缓存 1 次，实际 %d", cache.dels)
+	}
+}
+
+func TestGameServerDisable_InvalidatesCache(t *testing.T) {
+	store := &fakeGameServerStore{disabled: &repository.GameServerRecord{ID: 1, Code: "a", Name: "A", Status: 0}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	cache := svc.cache.(*fakeServerCache)
+
+	if _, err := svc.Disable(context.Background(), "1.2.3.4", "a"); err != nil {
+		t.Fatalf("期望禁用成功，实际 %v", err)
+	}
+	if cache.dels != 1 {
+		t.Fatalf("期望失效缓存 1 次，实际 %d", cache.dels)
+	}
+}
+
+// TestGameServerCreate_DelErrorIgnored 缓存失效失败不影响业务成功（由 TTL 兜底）。
+func TestGameServerCreate_DelErrorIgnored(t *testing.T) {
+	store := &fakeGameServerStore{created: &repository.GameServerRecord{ID: 1, Code: "a", Name: "A", Status: 1}}
+	svc := newGameServerService(store, &fakeServerRateLimiter{allowed: true})
+	svc.cache.(*fakeServerCache).delErr = errors.New("redis down")
+
+	if _, _, err := svc.Create(context.Background(), "1.2.3.4", "a", "A", ""); err != nil {
+		t.Fatalf("缓存失效失败不应影响创建结果，实际 %v", err)
 	}
 }

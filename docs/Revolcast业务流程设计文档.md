@@ -12,8 +12,12 @@
 | BIZ-005 | 网站账号登出 | 网站 HTTP `POST /api/v1/auth/logout` | 读取会话 Cookie、按 Token 撤销 `web_sessions` 当前会话（`revoked_at`）并清除本地 Cookie |
 | BIZ-006 | 网站赎回 QQ 绑定码 | 网站 HTTP `POST /api/v1/user/bind-QQ` | 已登录用户提交绑定码，原子消费 `qq_bind_codes` 并写入 `qq_bindings`（与 BIZ-001 对接） |
 | BIZ-007 | 网站解绑 QQ | 网站 HTTP `POST /api/v1/user/unbind-QQ` | 仅凭会话 Cookie 将 `qq_bindings` 中当前有效绑定软解绑（`status` 1→0、记录 `unbound_at`） |
+| BIZ-008 | 列出可用服务器 | QQ 私聊 `revolcast server list` | 查询 `game_servers`（`status=1`）并渲染服务器列表，带 Redis 5 分钟缓存 |
+| BIZ-009 | 生成游戏角色绑定码 | QQ 私聊 `revolcast server <code> bind` | 校验服务器可用 → QQ 已绑定账号 → 无角色绑定 → 生成 `game_bind_codes` 待使用码并私聊返回 |
 
 > 命令格式（`revolcast ...`）与上表优先级（P0/P1）均为草案示例，落地前需评审确认。
+>
+> **命令识别位置**：QQ Adapter **不**对私聊做任何过滤或业务判断，全部私聊原样上报 Backend（见 AGENTS.md §3.2）；命令前缀 / 参数解析、非命令消息的静默丢弃、回复文案全部由 Backend 负责。
 
 ---
 
@@ -327,5 +331,100 @@
 
 - HTTP：`POST /api/v1/user/unbind-QQ`
 - 接口契约详见《Revolcast HTTP 接口设计文档》§8
+
+---
+
+### 2.8 BIZ-008：列出可用服务器
+
+**触发端：** QQ 私聊 · **执行端：** Go Backend · **交付端：** QQ Adapter
+
+**业务目标**
+
+用户发送 `revolcast server list`，后端返回当前**可用**（`game_servers.status = 1`，启用）的服务器列表，包含名称、简介与代号，供用户后续用代号发起角色绑定（BIZ-009）。
+
+> 列表查询带 Redis 缓存（5 分钟），避免高频指令直接打库；该缓存是**可重建的展示数据**，不是权威配置。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **接收私聊事件** — Adapter 全量转发私聊，以 `event.qq.message.private` 上报（不做过滤） |
+| 02 | **识别业务命令** — Backend 校验首词为 `revolcast`（大小写不敏感）、词序列为 `server list`；非 `revolcast` 开头的消息静默丢弃 |
+| 03 | **读缓存** — `revolcast:cache:server:list:available` 命中则直接渲染，不查库 |
+| 04 | **回源查库** — 未命中 / Redis 故障时查 `game_servers WHERE status = 1`（`ORDER BY created_at DESC LIMIT 100`） |
+| 05 | **回填缓存** — 以 JSON 写入上述键，TTL 300s；写入失败仅记日志，不影响本次返回 |
+| 06 | **渲染文案** — 每条服务器渲染「`名称：简介`」+「`代号：code`」，条目间空行分隔；简介为空显示「暂无简介」；最多展示 20 条，超出追加总数提示 |
+| 07 | **下发私聊** — `command.qq.send_private_message` |
+
+**异常情况**
+
+- 无启用服务器：回复「当前没有可用的服务器。」
+- Redis 不可用：**fail-open**，退化为直接查库（不阻断）
+- 查询失败：`ErrInternal` → 通用错误文案，根因仅进日志
+- 缓存与库短暂不一致：创建/更新/停用服务器成功后主动 `DEL` 缓存键；极端情况下最长 5 分钟（TTL）后自愈
+
+**数据依赖**
+
+- 读：`game_servers`（`status = 1`）
+- 缓存：Redis `revolcast:cache:server:list:available`（TTL 300s）
+
+**协议依赖**
+
+- WS inbound：`event.qq.message.private`
+- WS outbound：`command.qq.send_private_message`
+
+---
+
+### 2.9 BIZ-009：生成游戏角色绑定码
+
+**触发端：** QQ 私聊 · **执行端：** Go Backend · **交付端：** QQ Adapter
+
+**业务目标**
+
+用户发送 `revolcast server <code> bind`，后端为该 QQ 已绑定的网站账号生成一个**指定服务器**的游戏角色绑定码，用户再到游戏内输入该码完成「网站账号 ↔ 游戏角色」绑定（对应数据库文档 §6.2，赎回侧 BIZ-010 待实现）。
+
+> 与 BIZ-001 的关系：两者生成逻辑同构（8 位、排除 `0O1IL`、幂等取/建、回收过期槽位），差异在于 `game_bind_codes` 绑定 `server_id` + `user_id`，且有效期 10 分钟。
+
+**主流程**
+
+| 步骤 | 处理 |
+| --- | --- |
+| 01 | **识别业务命令** — 词序列 `server <code> bind`；`code` 统一转小写 |
+| 02 | **服务器校验** — 走 `ResolveSubscribableServer` **直查数据库**（不吃列表缓存），格式非法 / 不存在 / 已停用统一回复「未找到该可用服务器」并给出 `server list` 指引 |
+| 03 | **QQ → 网站账号** — 查 `qq_bindings`（`status=1`）取 `user_id`；无记录则提示先完成 QQ 绑定（BIZ-001 + BIZ-006） |
+| 04 | **账号状态** — `users.status != 1` 拒绝发码（与 BIZ-006 口径一致） |
+| 05 | **角色绑定检查** — 查 `server_game_bindings`（`server_id + user_id + status=1`）；已存在则回显角色名并说明「一个账号在一个服务器只能绑定一个角色」，**不生成新码** |
+| 06 | **限流** — Redis `revolcast:ratelimit:qq:game_bind:{qq_uin}:{server_code}`，5 分钟 5 次，`fail-open` |
+| 07 | **幂等取/建绑定码** — 已有未过期待使用码直接复用；否则先把该 `(server_id, user_id)` 已过期仍 `status=0` 的旧码置 `status=2`（回收唯一槽位），再生成新码 |
+| 08 | **持久化** — 写 `game_bind_codes`（`code`、`server_id`、`user_id`、`qq_uin` 审计快照、`trace_id`、`status=0`、`expires_at≈10 分钟`）；`game_name` / `game_uuid` 留空待赎回收填 |
+| 09 | **下发私聊** — `command.qq.send_private_message`，文案含绑定码、服务器名称/代号、有效期 |
+
+**异常情况**
+
+- 服务器不可用：`SERVER_NOT_FOUND` 口径文案 + `server list` 指引（不区分停用与不存在，避免枚举）
+- QQ 未绑定账号：`GameBindOutcomeQQNotBound` → 引导先 `revolcast user bind`
+- 已有角色绑定：`GameBindOutcomeAlreadyBound` → 回显角色名，不发码
+- 账号被禁用：`ErrAccountDisabled`
+- 限流：`ErrRateLimited`
+- 码唯一冲突：重试生成（最多 8 次）
+- 并发重复请求：部分唯一索引 `ux_game_bind_codes_pending_user` 兜底，冲突后回退查询并返回同一码
+- 私聊发送失败：码已落库即视为业务成功，用户重发可拿回同一码
+
+**关键规则**
+
+- **限流位置在只读校验之后**：①服务器、②QQ 绑定、③账号状态、⑤角色绑定都是幂等只读查询，先给出确定性答案；限流只拦截真正会发码的请求。
+- **发码前的服务器判定必须查库**：列表缓存最长滞后 5 分钟，若用缓存判定，管理员停用服务器后仍会发出无法兑换的码。
+- **一个账号在一个服务器只有一个有效角色**（数据库文档 §3.7 部分唯一索引），因此不提供隐式解绑/换绑；更换角色需另行实现解绑能力。
+
+**数据依赖**
+
+- 读：`game_servers`、`qq_bindings`、`users`、`server_game_bindings`
+- 写：`game_bind_codes`（INSERT / 过期回收 UPDATE status 2）
+- 缓存：Redis `revolcast:ratelimit:qq:game_bind:{qq_uin}:{server_code}`
+
+**协议依赖**
+
+- WS inbound：`event.qq.message.private`
+- WS outbound：`command.qq.send_private_message`
 
 ---

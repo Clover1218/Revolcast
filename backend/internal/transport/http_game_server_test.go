@@ -110,7 +110,7 @@ func newGSTestMux(h *GameServerHandler) *http.ServeMux {
 
 func TestGameServerHandler_Create_Success(t *testing.T) {
 	store := &fakeGSStore{created: &repository.GameServerRecord{ID: 1, Code: "survival-01", Name: "生存服", Status: 1}}
-	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 
@@ -139,7 +139,7 @@ func TestGameServerHandler_Create_Success(t *testing.T) {
 }
 
 func TestGameServerHandler_Create_InvalidCode(t *testing.T) {
-	svc := biz.NewGameServerService(&fakeGSStore{}, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(&fakeGSStore{}, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 
@@ -155,7 +155,7 @@ func TestGameServerHandler_Create_InvalidCode(t *testing.T) {
 
 func TestGameServerHandler_List_Success(t *testing.T) {
 	store := &fakeGSStore{list: []*repository.GameServerRecord{{ID: 1, Code: "a", Name: "A", Status: 1}}}
-	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 
@@ -179,7 +179,7 @@ func TestGameServerHandler_List_Success(t *testing.T) {
 
 func TestGameServerHandler_GetByCode_NotFound(t *testing.T) {
 	store := &fakeGSStore{getErr: repository.ErrServerNotFound}
-	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 
@@ -194,7 +194,7 @@ func TestGameServerHandler_GetByCode_NotFound(t *testing.T) {
 
 func TestGameServerHandler_RotateSecret_Success(t *testing.T) {
 	store := &fakeGSStore{rotated: &repository.GameServerRecord{ID: 1, Code: "a", Name: "A", Status: 1}}
-	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(store, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 
@@ -217,7 +217,7 @@ func TestGameServerHandler_RotateSecret_Success(t *testing.T) {
 }
 
 func TestGameServerHandler_MethodNotAllowed(t *testing.T) {
-	svc := biz.NewGameServerService(&fakeGSStore{}, &fakeGSLimiter{allowed: true}, biz.GameServerConfig{})
+	svc := biz.NewGameServerService(&fakeGSStore{}, &fakeGSLimiter{allowed: true}, nil, biz.GameServerConfig{})
 	h := NewGameServerHandler(svc, zap.NewNop())
 	mux := newGSTestMux(h)
 

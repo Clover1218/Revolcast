@@ -85,19 +85,33 @@ func main() {
 	// HTTP 用户接口（BIZ-006 网站赎回 QQ 绑定码 / BIZ-007 网站解绑 QQ）：复用同一份 DB/Redis/Logger。
 	qqBindSvc := biz.NewQQBindService(sessionRepo, userRepo, pgRepo, redisRepo)
 	userHandler := transport.NewUserHandler(qqBindSvc, baseLogger, cfg.App.Env == "production")
+
+	// 游戏服务器业务（game_servers）：WS 接入鉴权、HTTP 管理接口、QQ 指令共用同一 service。
+	// 管理接口当前不鉴权（角色系统待引入，见 biz.GameServerService 的 TODO）。
+	// 第三个参数是「可用服务器列表」缓存（默认 5 分钟），服务器创建/更新/停用后自动失效。
+	gameServerRepo := repository.NewGameServerRepo(PostgreSQL)
+	gameServerSvc := biz.NewGameServerService(gameServerRepo, redisRepo, redisRepo, biz.GameServerConfig{})
+
+	// 游戏角色绑定业务（BIZ-008 列服务器 / BIZ-009 发绑定码）：
+	// qq_bindings 取「QQ → 网站账号」，server_game_bindings 判「账号 → 角色」，game_bind_codes 存取待使用码。
+	gameBindCodeRepo := repository.NewGameBindCodeRepo(PostgreSQL)
+	serverGameBindingRepo := repository.NewServerGameBindingRepo(PostgreSQL)
+	gameBindSvc := biz.NewGameBindService(
+		gameServerSvc, userRepo, pgRepo, serverGameBindingRepo, gameBindCodeRepo, redisRepo,
+		biz.GameBindConfig{},
+	)
+
 	pool := queue.NewPool(rootCtx, queue.Config{
 		Workers:        cfg.Queue.Workers,
 		QueueSize:      cfg.Queue.QueueSize,
 		EnqueueTimeout: time.Duration(cfg.Queue.EnqueueTimeout) * time.Millisecond,
 		TaskTimeout:    time.Duration(cfg.Queue.TaskTimeout) * time.Millisecond,
-	}, transport.NewBizHandler(hub, baseLogger, bindSvc, gameEventSvc), baseLogger)
+	}, transport.NewBizHandler(hub, baseLogger, bindSvc, gameBindSvc, gameEventSvc), baseLogger)
 	hub.SetPool(pool)
 	go hub.Run()
 
 	// 游戏服务器业务（game_servers）：WS 接入鉴权与 HTTP 管理接口共用同一 service。
-	// 管理接口当前不鉴权（角色系统待引入，见 biz.GameServerService 的 TODO）。
-	gameServerRepo := repository.NewGameServerRepo(PostgreSQL)
-	gameServerSvc := biz.NewGameServerService(gameServerRepo, redisRepo, biz.GameServerConfig{})
+	// gameServerRepo / gameServerSvc 已在上方（业务队列装配处）创建，此处不再重复构造。
 
 	// 同一 Server 同时承载 WS 与 HTTP API（/api/v1/*），复用监听与优雅关闭。
 	// 三类 WS 接入端共用一套连接抽象与 Hub，但各自独立索引、独立协议处理。
