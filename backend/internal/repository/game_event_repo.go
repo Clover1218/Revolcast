@@ -47,7 +47,8 @@ type GameEventData struct {
 }
 
 // GameEventRecord 是 game_events 的**读取**模型（含 _id）。
-// _id 仅用于游标定位（同一 received_at 下的稳定 tie-break），不作为对外字段。
+// _id 同时承担两个职责：同一 received_at 下的稳定 tie-break，以及事件的**统一身份**
+// （HTTP / WebSocket 都以它的 24 位十六进制形式作为 `id`）。除 `id` 外不对外暴露任何原始文档字段。
 type GameEventRecord struct {
 	ID         primitive.ObjectID `bson:"_id"`
 	EventType  string             `bson:"event_type"`
@@ -99,12 +100,22 @@ func NewGameEventRepo(db *mongo.Database) *GameEventRepo {
 	return &GameEventRepo{coll: db.Collection(gameEventsCollection)}
 }
 
-// InsertGameEvent 写入一条游戏事件审计日志；_id 由 MongoDB 自动生成。
-func (r *GameEventRepo) InsertGameEvent(ctx context.Context, doc *GameEventDoc) error {
-	if _, err := r.coll.InsertOne(ctx, doc); err != nil {
-		return fmt.Errorf("写入游戏事件失败: %w", err)
+// InsertGameEvent 写入一条游戏事件审计日志，返回 MongoDB 生成的 _id。
+//
+// 返回值语义：该 _id 即**已持久化文档**的 _id，调用方（biz.Ingest）直接用它作为事件的统一身份
+// 构造游标与推送 payload，无需回读文档。doc 未声明 _id 字段，由 MongoDB 生成并由驱动回传。
+// 若驱动回传的 InsertedID 不是 ObjectID（集合被外部改造等异常场景），视为写入契约被破坏并报错，
+// 避免向上游返回「写入成功但没有身份」的半成品结果。
+func (r *GameEventRepo) InsertGameEvent(ctx context.Context, doc *GameEventDoc) (primitive.ObjectID, error) {
+	res, err := r.coll.InsertOne(ctx, doc)
+	if err != nil {
+		return primitive.NilObjectID, fmt.Errorf("写入游戏事件失败: %w", err)
 	}
-	return nil
+	id, ok := res.InsertedID.(primitive.ObjectID)
+	if !ok {
+		return primitive.NilObjectID, fmt.Errorf("写入游戏事件返回非 ObjectID 的 _id: %T", res.InsertedID)
+	}
+	return id, nil
 }
 
 // QueryGameEvents 按服务器 + 游标条件分页查询事件，结果统一按 `received_at ASC, _id ASC` 返回。

@@ -11,10 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// eventTimeLayout 是事件时间对外的统一格式：UTC RFC3339，固定毫秒精度。
-// 与 MongoDB BSON Date 的毫秒精度一致，避免 RFC3339Nano 裁剪尾部 0 导致的格式漂移。
-const eventTimeLayout = "2006-01-02T15:04:05.000Z"
-
 // GameEventQueryer 是事件查询处理器对业务层的依赖（便于测试注入 fake）。
 type GameEventQueryer interface {
 	Query(ctx context.Context, actorKey, serverCode string, p biz.GameEventQueryParams) (*biz.GameEventPage, error)
@@ -35,8 +31,11 @@ func NewGameEventHandler(svc GameEventQueryer, auth WebSessionAuth, logger *zap.
 	return &GameEventHandler{svc: svc, auth: auth, log: logger.With(zap.String("module", "HTTPGameEvent"))}
 }
 
-// gameEventItemView 是单条事件的对外视图（不暴露 MongoDB _id，游标独立提供）。
+// gameEventItemView 是单条事件的对外视图。
+// ID 为持久化文档 _id 的 24 位十六进制，与 WebSocket 推送 payload.id 相同；
+// 除该字段外不暴露任何 MongoDB 原始文档字段。
 type gameEventItemView struct {
+	ID         string                     `json:"id"`
 	EventType  string                     `json:"event_type"`
 	ServerName string                     `json:"server_name"`
 	ServerID   int64                      `json:"server_id"`
@@ -119,12 +118,13 @@ func toGameEventPageView(page *biz.GameEventPage) *gameEventPageView {
 	}
 	for _, item := range page.Items {
 		view.Items = append(view.Items, &gameEventItemView{
+			ID:         item.ID.Hex(),
 			EventType:  item.EventType,
 			ServerName: item.ServerName,
 			ServerID:   item.ServerID,
 			Player:     item.Player,
-			OccurredAt: item.OccurredAt.UTC().Format(eventTimeLayout),
-			ReceivedAt: item.ReceivedAt.UTC().Format(eventTimeLayout),
+			OccurredAt: protocol.FormatEventTime(item.OccurredAt),
+			ReceivedAt: protocol.FormatEventTime(item.ReceivedAt),
 			Data:       item.Data,
 			Cursor:     item.Cursor,
 		})

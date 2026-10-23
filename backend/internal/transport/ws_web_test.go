@@ -15,6 +15,7 @@ import (
 	"revolcast-backend/internal/repository"
 
 	"github.com/gorilla/websocket"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 )
 
@@ -325,7 +326,11 @@ func TestServeWebWS_Success_AndPush(t *testing.T) {
 	}
 
 	// 通过 server_id 定位订阅者并推送一条 chat 事件。
+	// ID / Cursor 由 Ingest 从持久化结果产出，这里直接给出契约要求的值（与 HTTP items[] 同源）。
+	eventID := primitive.NewObjectID()
 	view := &biz.GameEventView{
+		ID:         eventID,
+		Cursor:     "cursor-1",
 		ServerID:   10,
 		EventType:  "player_chat",
 		Player:     protocol.QueqiaoPlayer{UUID: "uuid-1", Nickname: "Clover", IsOp: false},
@@ -364,8 +369,16 @@ func TestServeWebWS_Success_AndPush(t *testing.T) {
 	if payload.Player.Nickname != "Clover" {
 		t.Fatalf("payload 玩家快照错误: %+v", payload.Player)
 	}
-	if payload.OccurredAt != "2026-10-19T07:30:25Z" || payload.ReceivedAt != "2026-10-19T07:30:25.125Z" {
-		t.Fatalf("时间字段应为 UTC RFC3339Nano: %q / %q", payload.OccurredAt, payload.ReceivedAt)
+	// 事件身份必须随推送下发：id 为持久化 _id 的十六进制，cursor 与 HTTP 查询同源。
+	if payload.ID != eventID.Hex() || len(payload.ID) != 24 {
+		t.Fatalf("payload.id = %q, want %q", payload.ID, eventID.Hex())
+	}
+	if payload.Cursor != "cursor-1" {
+		t.Fatalf("payload.cursor = %q, want cursor-1", payload.Cursor)
+	}
+	// 时间与 HTTP 查询统一为 UTC RFC3339 固定毫秒格式（不再是 RFC3339Nano）。
+	if payload.OccurredAt != "2026-10-19T07:30:25.000Z" || payload.ReceivedAt != "2026-10-19T07:30:25.125Z" {
+		t.Fatalf("时间字段应为 UTC RFC3339 毫秒格式: %q / %q", payload.OccurredAt, payload.ReceivedAt)
 	}
 }
 

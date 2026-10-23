@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"revolcast-backend/internal/protocol"
 	"revolcast-backend/internal/repository"
@@ -22,8 +23,11 @@ var knownGameEventSubTypes = map[string]struct{}{
 
 // GameEventStore 是 GameEventService 对 game_events 存储的依赖（便于测试注入 fake）。
 // 接口定义在 biz 层，由 repository.GameEventRepo 实现；biz 不反向依赖 repository 的具体类型实现。
+//
+// InsertGameEvent 必须返回**已持久化文档**的 _id：它是事件的统一身份，游标与对外 `id` 均由此派生，
+// 不允许在 biz 层另行生成事件 ID（AGENTS.md §4/§5：ID 只有一个来源）。
 type GameEventStore interface {
-	InsertGameEvent(ctx context.Context, doc *repository.GameEventDoc) error
+	InsertGameEvent(ctx context.Context, doc *repository.GameEventDoc) (primitive.ObjectID, error)
 }
 
 // 编译期断言：repository.GameEventRepo 必须满足 biz.GameEventStore。
@@ -42,13 +46,18 @@ func NewGameEventService(store GameEventStore) *GameEventService {
 
 // GameEventView 是已落库游戏事件的规范化视图，供 Web 端 WebSocket 推送使用。
 // 时间转换规则与落库文档同源（由 Ingest 统一产出），避免推送与存储两处各写一套导致漂移。
+//
+// ID / Cursor 取自**持久化结果**（MongoDB _id + 落库前的毫秒级 receivedAt），
+// 与 HTTP 查询侧 `toGameEventItem` 使用同一个编码函数，因此同一条事件在两侧身份完全一致。
 type GameEventView struct {
+	ID         primitive.ObjectID     // 持久化文档的 MongoDB _id，事件统一身份
+	Cursor     string                 // 由 (ReceivedAt, ID) 确定性生成的分页游标，与 HTTP items[].cursor 相同
 	ServerID   int64                  // 已鉴权的 game_servers.id（来自 WS 连接身份）
 	ServerName string                 // 事件上报的服务器名快照，仅展示
 	EventType  string                 // player_join / player_quit / player_chat / player_command
 	Player     protocol.QueqiaoPlayer // 玩家快照
 	OccurredAt time.Time              // 事件发生时间（由原始秒级 timestamp 还原）
-	ReceivedAt time.Time              // 后端收到时间
+	ReceivedAt time.Time              // 后端收到时间（写入前已截断到毫秒）
 	Message    string                 // 仅 player_chat
 	RawMessage string                 // player_chat: 文本组件 JSON；player_command: 无业务价值
 	MessageID  string                 // 聊天/命令事件
@@ -58,6 +67,13 @@ type GameEventView struct {
 // Ingest 接收已鉴权服务器（serverID 来自 WS 已鉴权身份，不得由 server_name 反查）上报的原始事件，
 // 转换后写入 MongoDB，并返回规范化视图供调用方（Web 推送）复用。
 // 参数 receivedAt 为后端收到事件的时间（来自 WS readPump，UTC）。
+//
+// 数据来源单一化：返回的视图不是「推送专用副本」，而是对持久化结果的投影——
+//   - ID 取 InsertOne 回传的 _id（已持久化文档的真实身份，无需回读文档确认）；
+//   - ReceivedAt 为写入前截断到毫秒的值（BSON Date 精度即毫秒，落库后再读回必然得到同一值）；
+//   - Cursor 由 (ReceivedAt, ID) 经 encodeGameEventCursor 生成，与 HTTP 查询侧同函数同输入。
+//
+// 因此 HTTP 与 WebSocket 对同一事件给出完全相同的 id / cursor / received_at。
 //
 // 未知 sub_type 或空事件返回 ErrInvalidParam；写入失败包裹为 ErrInternal 并保留根因（供日志输出完整链）。
 // 返回值 nil 表示事件未被接受（此时不会写入存储），调用方不得据此推送。
@@ -100,9 +116,15 @@ func (s *GameEventService) Ingest(ctx context.Context, serverID int64, receivedA
 		Data:       buildGameEventData(view),
 	}
 
-	if err := s.store.InsertGameEvent(ctx, doc); err != nil {
+	id, err := s.store.InsertGameEvent(ctx, doc)
+	if err != nil {
 		return nil, Wrap(ErrInternal, err, "写入游戏事件失败")
 	}
+
+	// 身份与游标必须在写入成功之后才能确定（_id 由 MongoDB 生成）。
+	// 写入失败时上面的 return 已阻止下游推送，不会出现「推送了不存在的事件」。
+	view.ID = id
+	view.Cursor = encodeGameEventCursor(view.ReceivedAt, view.ID)
 	return view, nil
 }
 

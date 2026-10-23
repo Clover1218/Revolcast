@@ -13,6 +13,7 @@ import (
 	"revolcast-backend/internal/biz"
 	"revolcast-backend/internal/protocol"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 )
 
@@ -49,6 +50,7 @@ type eventEnvelope struct {
 
 type eventPageData struct {
 	Items []struct {
+		ID         string                     `json:"id"`
 		EventType  string                     `json:"event_type"`
 		ServerName string                     `json:"server_name"`
 		ServerID   int64                      `json:"server_id"`
@@ -62,6 +64,16 @@ type eventPageData struct {
 	NewestCursor *string `json:"newest_cursor"`
 	NextCursor   *string `json:"next_cursor"`
 	HasMore      bool    `json:"has_more"`
+}
+
+// mustEventOID 解析 24 位十六进制 ObjectId（测试用）。
+func mustEventOID(t *testing.T, hex string) primitive.ObjectID {
+	t.Helper()
+	id, err := primitive.ObjectIDFromHex(hex)
+	if err != nil {
+		t.Fatalf("非法 ObjectId %q: %v", hex, err)
+	}
+	return id
 }
 
 func newEventTestHandler(q *fakeEventQueryer, auth *fakeWebSessionAuth) *GameEventHandler {
@@ -147,13 +159,16 @@ func TestGameEventHandler_InvalidLimitFormat(t *testing.T) {
 	}
 }
 
-// 正常响应：字段映射、毫秒时间格式、data 按类型裁剪、游标透传。
+// 正常响应：字段映射、毫秒时间格式、data 按类型裁剪、事件 id / 游标透传。
 func TestGameEventHandler_SuccessMapping(t *testing.T) {
 	oldest := "c-oldest"
 	newest := "c-newest"
+	firstID := mustEventOID(t, "65000000000000000000000a")
+	secondID := mustEventOID(t, "65000000000000000000000b")
 	page := &biz.GameEventPage{
 		Items: []*biz.GameEventItem{
 			{
+				ID:         firstID,
 				ServerID:   1,
 				ServerName: "TestServer",
 				EventType:  "player_chat",
@@ -164,6 +179,7 @@ func TestGameEventHandler_SuccessMapping(t *testing.T) {
 				Cursor:     oldest,
 			},
 			{
+				ID:         secondID,
 				ServerID:   1,
 				ServerName: "TestServer",
 				EventType:  "player_command",
@@ -205,6 +221,13 @@ func TestGameEventHandler_SuccessMapping(t *testing.T) {
 	if item.EventType != "player_chat" || item.ServerID != 1 || item.Player.Nickname != "PlantClover" {
 		t.Errorf("首条字段映射错误: %+v", item)
 	}
+	// id 为持久化 _id 的 24 位十六进制，与 WS 推送 payload.id 同源。
+	if item.ID != firstID.Hex() || len(item.ID) != 24 {
+		t.Errorf("items[].id = %q, want %q", item.ID, firstID.Hex())
+	}
+	if data.Items[1].ID != secondID.Hex() {
+		t.Errorf("items[1].id = %q, want %q", data.Items[1].ID, secondID.Hex())
+	}
 	// 时间固定毫秒格式，与存储精度一致。
 	if item.OccurredAt != "2026-10-19T07:29:37.000Z" || item.ReceivedAt != "2026-10-19T07:29:37.125Z" {
 		t.Errorf("时间格式错误: %q / %q", item.OccurredAt, item.ReceivedAt)
@@ -227,7 +250,7 @@ func TestGameEventHandler_SuccessMapping(t *testing.T) {
 	if data.Items[1].Data.RawMessage != "" {
 		t.Errorf("command 事件不应下发 raw_message: %q", data.Items[1].Data.RawMessage)
 	}
-	// 不暴露 MongoDB _id。
+	// _id 仅以 24 位十六进制的 id 字段暴露，不返回 MongoDB 原始文档字段。
 	if strings.Contains(string(env.Data), `"_id"`) {
 		t.Errorf("响应不应包含 _id 字段: %s", env.Data)
 	}

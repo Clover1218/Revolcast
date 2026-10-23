@@ -702,7 +702,8 @@ Session Token **只用于鉴权，不作为连接标识**；同一用户可并�
 
 **Origin 策略：** 白名单非空时必须携带 Origin 且命中；白名单为空时开发环境放行、生产环境一律拒绝（fail-closed）。
 
-**推送消息：** `type = event.game.<sub_type>`，`payload` 含 `server_code` / `server_id` / `event_type` / `player` / `occurred_at` / `received_at` / `data`，
+**推送消息：** `type = event.game.<sub_type>`，`payload` 含 `id` / `cursor` / `server_code` / `server_id` / `event_type` / `player` / `occurred_at` / `received_at` / `data`，
+其中 `id` / `cursor` / `received_at` 与本节事件查询 `items[]` 的同名字段**完全相同**（同一条持久化记录的两个投影），
 详见《Websocket消息结构设计文档》「推送消息：`event.game.<sub_type>`」。
 
 **当前边界：** 本轮仅校验登录与服务器可用性，**未**接入 `server_game_bindings` 的归属与 `visibility`（公开/隐身）过滤；
@@ -765,6 +766,8 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 
 **为什么用复合游标：** 同一毫秒内可能有多条事件（例如 join 后立刻 quit），仅用时间戳会重复或遗漏。`_id`（ObjectId）在集合内唯一且不可变，作为**同一毫秒内的稳定全序**；但它**不承担顺序号语义**（不保证严格反映写入顺序，也不做递增性依赖），排序始终以 `received_at` 为主键。
 
+**与 WebSocket 的一致性（统一事件身份）：** 游标由 `(received_at, _id)` **确定性**生成，且 `received_at` 在写入 MongoDB 前已截断到毫秒（§13.7）。因此同一条持久化事件在 HTTP `items[].cursor` 与 WS 推送 `payload.cursor` 中是**同一个字符串**（后端两侧调用同一个编码函数），`items[].id` 与 `payload.id` 也同为该 `_id` 的十六进制。前端不得自行拼接游标，也不得解析其内部结构。
+
 **不使用 `occurred_at` 作游标：** 游戏事件发生时间与后端接收时间可能存在延迟或乱序，用 `occurred_at` 分页会出现「晚到但时间早」的事件被永久跳过。
 
 ### 13.4 响应
@@ -776,6 +779,7 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
   "data": {
     "items": [
       {
+        "id": "6ada272e0315fd31cf53187c",
         "event_type": "player_chat",
         "server_name": "TestServer",
         "server_id": 1,
@@ -783,12 +787,12 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
         "occurred_at": "2026-10-19T07:29:37.000Z",
         "received_at": "2026-10-19T07:29:37.125Z",
         "data": { "message": "有人吗", "raw_message": "{\"text\":\"有人吗\"}", "message_id": "" },
-        "cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9"
+        "cursor": "eyJ0IjoxNzkyMzk0OTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9"
       }
     ],
-    "oldest_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
-    "newest_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
-    "next_cursor": "eyJ0IjoxNzYwODYyMTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "oldest_cursor": "eyJ0IjoxNzkyMzk0OTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "newest_cursor": "eyJ0IjoxNzkyMzk0OTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
+    "next_cursor": "eyJ0IjoxNzkyMzk0OTc3MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
     "has_more": false
   }
 }
@@ -797,14 +801,15 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `items` | `array` | 当前页事件，**统一升序**（`received_at ASC, _id ASC`） |
+| `items[].id` | `string` | **事件统一身份**：持久化文档 `_id` 的 24 位十六进制串。前端**唯一去重键**；与 WebSocket 推送的 `payload.id` 完全相同（§12.10） |
 | `items[].event_type` | `string` | `player_join` / `player_quit` / `player_chat` / `player_command` |
 | `items[].server_name` | `string` | 事件上报时的服务器名快照，**仅展示**；归属以 `server_id` 为准 |
 | `items[].server_id` | `int64` | `game_servers.id`，来自落库时已鉴权的服务器身份 |
 | `items[].player` | `object` | `{uuid, nickname, is_op}` 快照 |
-| `items[].occurred_at` | `string` | 事件发生时间，UTC RFC3339，毫秒精度 |
-| `items[].received_at` | `string` | 后端接收时间，UTC RFC3339，毫秒精度（**分页依据**） |
+| `items[].occurred_at` | `string` | 事件发生时间，UTC RFC3339，固定毫秒精度（`2006-01-02T15:04:05.000Z`） |
+| `items[].received_at` | `string` | 后端接收时间，UTC RFC3339，固定毫秒精度（**分页依据**） |
 | `items[].data` | `object` | `player_join`/`player_quit` → `{}`；`player_chat` → `message` / `raw_message` / `message_id`；`player_command` → `command` / `message_id`（`raw_message` 为 Java 对象 toString，与 §12.10 推送一致**不下发**）；零值字段省略 |
-| `items[].cursor` | `string` | 该事件的游标，供前端保存「最后已处理位置」 |
+| `items[].cursor` | `string` | 该事件的游标（由 `received_at` + `_id` 确定性生成），供前端保存分页位置；与 WS 推送的 `payload.cursor` 完全相同 |
 | `oldest_cursor` | `string \| null` | 本页**最早**事件游标；空页为 `null` |
 | `newest_cursor` | `string \| null` | 本页**最新**事件游标；空页为 `null` |
 | `next_cursor` | `string \| null` | **沿当前方向继续翻页**的游标：`before` 模式 = `oldest_cursor`；默认 / `after` 模式 = `newest_cursor`；空页为 `null` |
@@ -815,7 +820,7 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 - 上滑加载更多：用 `before` + `oldest_cursor`；
 - 断线补齐：用 `after` + `newest_cursor`（即使 `has_more=false`，仍需保存 `newest_cursor` 作为下次补齐起点）。
 
-**不暴露内容：** `_id` 不出现在响应任何字段中（仅藏于游标内）；不返回 MongoDB 原始文档。
+**不暴露内容：** `_id` 只以 `items[].id`（24 位十六进制）这一个字段出现，**不返回** MongoDB 原始文档、`bson` 内部字段或其他集合字段。
 
 ### 13.5 主流程
 
@@ -863,7 +868,8 @@ cursor = base64url_nopad( JSON{"t": <received_at 的 Unix 毫秒>, "id": "<Objec
 - **首次加载** → 本接口默认模式（最新 N 条）。
 - **上滑历史** → 本接口 `before` 模式，结果前置追加。
 - **实时增量** → §12.10 WebSocket 推送。
-- **断线恢复** → 保存「最后已处理事件的游标」，重连后以 `after` 补齐；补齐期间实时推送可能与之重叠，**前端必须按事件游标（或 `_id` 级稳定标识）去重**，不能仅凭 `received_at`——同一毫秒可能有多条不同事件。
+- **断线恢复** → 保存「最后已处理事件的 `cursor`」（`newest_cursor`），重连后以 `after` 补齐；补齐期间实时推送可能与之重叠，**前端必须按 `items[].id`（即 MongoDB `_id`）去重**，不能仅凭 `received_at`（同一毫秒可能有多条不同事件），也不能用 `trace_id`（链路追踪标识，不是事件身份）。
+- **展示顺序** → 按 `received_at ASC, id ASC` 排列（`id` 为 24 位十六进制，字典序与 BSON `_id` 的字节序一致），与后端分页顺序一致。
 
 ### 13.9 鉴权与可见性边界
 

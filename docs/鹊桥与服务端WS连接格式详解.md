@@ -89,7 +89,7 @@
 > - **`player`**：统一保存 `{ uuid, nickname, is_op }` 快照。
 > - **`occurred_at`**：由原始 `timestamp`（秒级 Unix 时间戳）转为 UTC 时间；**`received_at`**：后端收到事件后写入的 UTC 时间，截断到**毫秒**。
 > - **时间字段存储类型为 BSON Date**（不是字符串）。⚠️ 历史版本曾以 `time.RFC3339Nano` 字符串存储，尾部 0 被裁剪导致小数位长度不定（`...34.5Z` 字典序大于 `...34.522048Z`，但时间更早），无法用于游标分页；已由 `backend/cmd/migrate-game-events` 一次性迁移为 Date。**新写入代码必须用 `time.Time`，禁止再写字符串**。下方 JSON 示例中的时间以 ISO8601 展示仅为可读性，Extended JSON 形式为 `{"$date":"2026-10-19T07:30:25.125Z"}`。
-> - **`_id`**：由 MongoDB 自动生成 `ObjectId`，应用层不赋值（下方示例省略）。
+> - **`_id`**：由 MongoDB 自动生成 `ObjectId`，应用层不赋值（下方示例省略）。它同时是**事件的统一身份**：`InsertOne` 回传的 `_id` 直接用于生成 HTTP / WebSocket 两侧的 `id`（24 位十六进制）与分页游标，不额外生成 UUID 作为事件 ID。
 
 以下值必填:
 | 字段名 | 数据类型 | 说明 |

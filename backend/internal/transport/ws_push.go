@@ -2,7 +2,6 @@ package transport
 
 import (
 	"encoding/json"
-	"time"
 
 	"revolcast-backend/internal/biz"
 	"revolcast-backend/internal/protocol"
@@ -14,14 +13,19 @@ import (
 //
 // 消息类型沿用统一协议：type = event.game.<event_type>，trace_id 沿用产生该事件的链路，
 // payload 为 protocol.GameEventPushPayload（服务端已完成字段与时间归一化）。
+//
+// 身份字段直接取自 view.ID / view.Cursor（由 Ingest 从持久化结果产出），此处**不得**重新生成
+// ID、时间戳或游标；时间统一走 protocol.FormatEventTime，与 HTTP 查询输出同一格式。
 func buildGameEventPush(traceID string, view *biz.GameEventView, serverCode string) ([]byte, error) {
 	payload := protocol.GameEventPushPayload{
+		ID:         view.ID.Hex(),
+		Cursor:     view.Cursor,
 		ServerCode: serverCode,
 		ServerID:   view.ServerID,
 		EventType:  view.EventType,
 		Player:     view.Player,
-		OccurredAt: view.OccurredAt.UTC().Format(time.RFC3339Nano),
-		ReceivedAt: view.ReceivedAt.UTC().Format(time.RFC3339Nano),
+		OccurredAt: protocol.FormatEventTime(view.OccurredAt),
+		ReceivedAt: protocol.FormatEventTime(view.ReceivedAt),
 		Data:       buildGameEventPushData(view),
 	}
 

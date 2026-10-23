@@ -6,22 +6,29 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"revolcast-backend/internal/protocol"
 	"revolcast-backend/internal/repository"
 )
 
 // fakeGameEventStore 是 GameEventStore 的测试替身，捕获插入的文档以做断言。
+// 与真实仓储一致：写入时由「MongoDB 侧」生成 _id 并回传，biz 不得自行生成事件 ID。
 type fakeGameEventStore struct {
 	inserted []*repository.GameEventDoc
+	ids      []primitive.ObjectID // 预置回传的 _id（按写入顺序消费）；耗尽后自动生成
 	err      error
 }
 
-func (f *fakeGameEventStore) InsertGameEvent(_ context.Context, doc *repository.GameEventDoc) error {
+func (f *fakeGameEventStore) InsertGameEvent(_ context.Context, doc *repository.GameEventDoc) (primitive.ObjectID, error) {
 	if f.err != nil {
-		return f.err
+		return primitive.NilObjectID, f.err
 	}
 	f.inserted = append(f.inserted, doc)
-	return nil
+	if len(f.ids) >= len(f.inserted) {
+		return f.ids[len(f.inserted)-1], nil
+	}
+	return primitive.NewObjectID(), nil
 }
 
 func baseGameEventPayload(subType string) *protocol.GameEventPayload {
@@ -57,7 +64,8 @@ func TestGameEventService_Ingest_OK(t *testing.T) {
 			p.Command = "gamemode creative"
 
 			recv := time.Date(2026, 10, 19, 7, 30, 25, 125000000, time.UTC)
-			if _, err := svc.Ingest(context.Background(), 7, recv, p); err != nil {
+			view, err := svc.Ingest(context.Background(), 7, recv, p)
+			if err != nil {
 				t.Fatalf("Ingest 不应返回错误: %v", err)
 			}
 			if len(store.inserted) != 1 {
@@ -94,6 +102,18 @@ func TestGameEventService_Ingest_OK(t *testing.T) {
 			}
 			if tc.subType == "player_command" && doc.Data["command"] != "gamemode creative" {
 				t.Errorf("command data.command = %v, want 'gamemode creative'", doc.Data["command"])
+			}
+			// 事件身份来自持久化结果：_id 由存储回传，游标由 (received_at, _id) 确定性生成。
+			// 两者在写入成功后必须立即可用，供 WS 推送与 HTTP 查询给出同一身份。
+			if view.ID.IsZero() {
+				t.Fatal("Ingest 必须回填持久化文档的 _id")
+			}
+			if want := encodeGameEventCursor(doc.ReceivedAt, view.ID); view.Cursor != want {
+				t.Errorf("Cursor = %q, want %q（应由落库时刻与 _id 生成）", view.Cursor, want)
+			}
+			// 落库值与视图时刻必须一致（毫秒截断后同源），否则游标 t 与 BSON Date 会对不上。
+			if !view.ReceivedAt.Equal(doc.ReceivedAt) {
+				t.Errorf("视图 ReceivedAt = %v 与落库值 %v 不一致", view.ReceivedAt, doc.ReceivedAt)
 			}
 		})
 	}

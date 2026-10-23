@@ -1,5 +1,7 @@
 package protocol
 
+import "time"
+
 // 本文件定义鹊桥（连接端）上报的原始游戏事件 DTO，依据 docs/鹊桥与服务端WS连接格式详解.md。
 //
 // 关键约定：这些事件以「原始 JSON 直发」（不带统一 Envelope 包装），由 transport 层
@@ -46,19 +48,37 @@ const (
 // GameEventPushPayload 是「游戏事件落库成功后推送给 Web 端（已登录用户）」的 Envelope.Payload。
 //
 // 与鹊桥原始事件的差异：
+//   - 增加 id / cursor：与 HTTP 事件查询（GET .../events 的 items[]）**完全一致**的事件身份，
+//     二者都取自同一条持久化记录，前端据此去重与续页；
 //   - 增加 server_code / server_id：前端以 server_code 订阅，事件归属由服务端已鉴权身份派生；
-//   - 时间为 UTC RFC3339Nano 字符串（原始为秒级 Unix 时间戳），前端无需再做单位换算；
+//   - 时间为 UTC RFC3339 固定毫秒字符串（见 FormatEventTime），与 HTTP 查询输出同一格式，
+//     且与 MongoDB BSON Date 的毫秒精度一致；
 //   - 只暴露审计与展示所需字段，不透传 server_version / post_type 等适配层字段。
 //
 // 消息外层仍为统一 Envelope：type = event.game.<event_type>，trace_id 沿用产生该事件的链路。
+// trace_id 仅用于链路追踪，**不得**作为事件身份或去重键。
 type GameEventPushPayload struct {
+	ID         string            `json:"id"`          // 持久化文档 _id 的 24 位十六进制，事件统一身份
+	Cursor     string            `json:"cursor"`      // 分页游标，与 HTTP items[].cursor 相同
 	ServerCode string            `json:"server_code"` // 服务器短标识，与订阅路径参数一致
 	ServerID   int64             `json:"server_id"`   // game_servers.id
 	EventType  string            `json:"event_type"`  // player_join / player_quit / player_chat / player_command
 	Player     QueqiaoPlayer     `json:"player"`      // 玩家快照（uuid/nickname/is_op）
-	OccurredAt string            `json:"occurred_at"` // 事件发生时间，UTC RFC3339Nano
-	ReceivedAt string            `json:"received_at"` // 后端收到时间，UTC RFC3339Nano
+	OccurredAt string            `json:"occurred_at"` // 事件发生时间，UTC RFC3339 毫秒
+	ReceivedAt string            `json:"received_at"` // 后端收到时间，UTC RFC3339 毫秒（与落库值同一时刻）
 	Data       GameEventPushData `json:"data"`        // 按事件类型填充，join/quit 为空对象
+}
+
+// EventTimeLayout 是游戏事件时间字段对外的**唯一**格式：UTC，固定 3 位毫秒。
+//
+// 不用 RFC3339Nano：它裁剪尾部 0，同一字段可能出现 0/3/6/9 位小数，既与 BSON Date 的毫秒精度
+// 不对齐，也让前端拿到长度不一的字符串（按字符串比较排序会出错）。
+const EventTimeLayout = "2006-01-02T15:04:05.000Z"
+
+// FormatEventTime 把事件时间格式化为对外统一格式（HTTP 与 WebSocket 共用）。
+// 输入为 UTC 时刻；会先 Truncate 到毫秒，保证与写入 MongoDB 前的截断、以及游标里的 t 完全一致。
+func FormatEventTime(t time.Time) string {
+	return t.UTC().Truncate(time.Millisecond).Format(EventTimeLayout)
 }
 
 // GameEventPushData 是推送给前端的差异化事件内容（零值字段省略）。

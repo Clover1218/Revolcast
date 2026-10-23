@@ -52,7 +52,8 @@ type GameEventQueryParams struct {
 }
 
 // GameEventItem 是事件查询的单条结果（已含游标）。
-// ID 仅内部保留（游标已编码为字符串），不直接对外暴露 MongoDB 的 _id。
+// ID 是持久化文档的 MongoDB _id，transport 层以 24 位十六进制形式作为对外 `id`；
+// Cursor 与 WebSocket 推送的 payload.cursor 由同一函数、同一输入生成，因此两者恒等。
 type GameEventItem struct {
 	ID         primitive.ObjectID
 	ServerID   int64
@@ -211,6 +212,10 @@ type gameEventCursor struct {
 }
 
 // encodeGameEventCursor 把「received_at + _id」编码为 base64url(无 padding) 的不透明游标。
+//
+// 这是游标生成的**唯一入口**：HTTP 查询（toGameEventItem）与 WebSocket 推送（Ingest 返回的
+// GameEventView.Cursor）都调用本函数。只要两边的 receivedAt 已按毫秒截断、ID 同源于持久化文档，
+// 同一事件在两条链路上必然得到完全相同的游标——不要在其他位置另写一套编码逻辑。
 func encodeGameEventCursor(receivedAt time.Time, id primitive.ObjectID) string {
 	b, err := json.Marshal(gameEventCursor{ReceivedAt: receivedAt.UnixMilli(), ID: id.Hex()})
 	if err != nil {

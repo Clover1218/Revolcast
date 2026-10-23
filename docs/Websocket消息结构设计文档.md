@@ -95,11 +95,13 @@ Type字段基本格式如下：
   "type": "event.game.player_chat",
   "trace_id": "与产生该事件的链路一致",
   "payload": {
+    "id": "6ada272e0315fd31cf53187c",
+    "cursor": "eyJ0IjoxNzkyMzk1MDI1MTI1LCJpZCI6IjZhZGEyNzJlMDMxNWZkMzFjZjUzMTg3YyJ9",
     "server_code": "survival",
     "server_id": 10,
     "event_type": "player_chat",
     "player": { "uuid": "a3b91ae7", "nickname": "Clover", "is_op": false },
-    "occurred_at": "2026-10-19T07:30:25Z",
+    "occurred_at": "2026-10-19T07:30:25.000Z",
     "received_at": "2026-10-19T07:30:25.125Z",
     "data": { "message": "hello", "raw_message": "{\"text\":\"hello\"}", "message_id": "m1" }
   }
@@ -109,12 +111,16 @@ Type字段基本格式如下：
 | 字段 | 说明 |
 | :--- | :--- |
 | `type` | `event.game.player_join` / `player_quit` / `player_chat` / `player_command` |
+| `id` | **事件统一身份**：持久化文档 `_id` 的 24 位十六进制串。前端**唯一去重键**，与 HTTP 事件查询 `items[].id` 完全相同 |
+| `cursor` | 分页游标，由该事件的 `(received_at, _id)` 确定性生成，与 HTTP `items[].cursor` 完全相同；前端只保存与回传，**不解析**内部结构 |
 | `server_code` / `server_id` | 事件所属服务器（`server_id` 由服务端已鉴权身份派生，不可由 `server_name` 反查） |
-| `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339Nano 字符串；`received_at` 精度为**毫秒**（落库前已截断），与 MongoDB 存储及 HTTP 事件查询（《HTTP 接口设计文档》§13）指向同一时刻 |
+| `occurred_at` / `received_at` | 事件发生时间与服务端收到时间，UTC RFC3339 **固定毫秒**格式（`2006-01-02T15:04:05.000Z`）；`received_at` 在落库前已截断到毫秒，与 MongoDB 存储、HTTP 事件查询（《HTTP 接口设计文档》§13）指向同一时刻 |
 | `data` | join/quit 为 `{}`；chat 为 `{message, raw_message, message_id}`；command 为 `{command, message_id}` |
 
+- **数据来源单一**：`id` / `cursor` / `received_at` 全部取自同一条持久化记录（`InsertOne` 回传的 `_id` + 落库前已截断的 `received_at`），不在推送侧重新生成时间戳、ID 或游标。故同一条事件在 HTTP 与 WS 两侧身份完全一致。
+- **`trace_id` 不得代替事件 ID**：它只用于串联链路（例如把一次落库与一次推送日志关联），既不稳定也不唯一（同一条链路的多条消息共用），不能作为去重键。
 - `data.raw_message` 仅 chat 下发（Minecraft 文本组件 JSON）；command 的 `raw_message` 是 Java 对象 `toString`，无业务价值，不下发。
-- 推送是**尽力而为**：单个连接发送队列满时只丢弃该连接的消息，不影响落库结果与其他连接。
+- 推送是**尽力而为**：单个连接发送队列满时只丢弃该连接的消息，不影响落库结果与其他连接。推送丢失的事件不会被补发，前端需在重连后用 HTTP `after` + `cursor` 补齐（重叠部分按 `id` 去重）。
 - 消息外层仍是统一 Envelope，与 Adapter / GameServer 共用协议封装，但**消息方向不同**：这是 `event.*`（服务端 → 前端），不涉及 `command.*`。
 
 ### 身份与连接约束
