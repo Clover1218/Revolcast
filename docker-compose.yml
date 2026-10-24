@@ -144,9 +144,14 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # 构建期网络，只影响 build（拉 apk / go 模块），不影响容器运行时。
+      # 默认 default；国内若仍慢可试 host（新版 Compose 需 network.host 授权，
+      # 报错就改回 default，或单独用 docker build --network=host）。
+      network: ${BUILD_NETWORK:-default}
       args:
         GO_VERSION: ${GO_VERSION:-1.26.5}
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        APK_MIRROR: ${APK_MIRROR:-mirrors.aliyun.com}
     image: revolcast/backend:${IMAGE_TAG:-local}
     container_name: revolcast-backend
     restart: unless-stopped
@@ -240,9 +245,11 @@ services:
     build:
       context: ./revolcast-qq-adapter
       dockerfile: Dockerfile
+      network: ${BUILD_NETWORK:-default}
       args:
         GO_VERSION: ${GO_VERSION:-1.26.5}
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        APK_MIRROR: ${APK_MIRROR:-mirrors.aliyun.com}
     image: revolcast/qq-adapter:${IMAGE_TAG:-local}
     container_name: revolcast-qq-adapter
     restart: unless-stopped
