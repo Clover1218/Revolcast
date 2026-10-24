@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"revolcast-qq-adapter/internal/config"
@@ -13,7 +14,10 @@ import (
 	"revolcast-qq-adapter/internal/transport"
 
 	zero "github.com/wdvxdr1123/ZeroBot"
+
 	"github.com/wdvxdr1123/ZeroBot/driver"
+	"github.com/wdvxdr1123/ZeroBot/message"
+
 	"go.uber.org/zap"
 )
 
@@ -55,6 +59,25 @@ func main() {
 		client.SendEnvelope(protocol.TypeEventQQMessagePrivate, protocol.NewCommandID(), payload)
 	})
 
+	// ------------------------------------------------------------------
+	// 【临时能力·可整块删除】群内 @ 机器人 = 私聊命令
+	//
+	// 目的：在群里 @ 机器人时，复用与私聊完全相同的指令识别与业务分发
+	// （Backend route 对两种会话走同一套 switch），回执落在原群。
+	// 只在「@ 了机器人 / 以昵称开头」时上报，普通群聊一律不转发，
+	// 避免像私聊那样把整个群的消息都灌给 Backend。
+	//
+	// 删除方式：删掉本段 handler 与 buildGroupAtPayload / plainText 即可，
+	// 不影响私聊链路（Backend 的群聊分支届时不再被激活）。
+	// 已知取舍：`revolcast user bind` / `server <code> bind` 生成的绑定码会公开在群里，
+	// 需要收紧时在此处按指令白名单过滤。
+	// ------------------------------------------------------------------
+	zero.OnMessage(zero.OnlyGroup, zero.OnlyToMe).Handle(func(zctx *zero.Ctx) {
+		payload := buildGroupAtPayload(zctx)
+		client.SetSelfID(zctx.Event.SelfID) // 群聊场景下也可能从未有过私聊，这里同样记录
+		client.SendEnvelope(protocol.TypeEventQQMessageGroup, protocol.NewCommandID(), payload)
+	})
+
 	zero.RunAndBlock(&zero.Config{
 		NickName:      []string{"bot"},
 		CommandPrefix: "",
@@ -63,6 +86,30 @@ func main() {
 			driver.NewWebSocketClient("ws://127.0.0.1:6701", "J5xTRRESL-Fsdq1b"),
 		},
 	}, nil)
+}
+
+// buildGroupAtPayload 把「群内 @ 机器人」的消息转换为统一协议 payload。
+//
+// 与私聊 payload 的差别只有一处：message.text 不能直接用 RawMessage。
+// 群聊的 raw_message 里仍带着 [CQ:at,qq=...] 前缀（ZeroBot 只会从 Message 段里移除 @，
+// 不会改写 RawMessage），而 Backend 的指令识别要求首个词是 revolcast，
+// 因此这里用已解析的消息段重拼纯文本。
+func buildGroupAtPayload(zctx *zero.Ctx) protocol.QQMessagePayload {
+	p := buildPrivatePayload(zctx)
+	p.Message.Text = plainText(zctx.Event.Message)
+	p.IsToMe = true // 群聊走到这里说明确实 @ 了机器人
+	return p
+}
+
+// plainText 拼接消息段中的文本内容；@ / 图片 / 表情等非文本段不参与指令识别。
+func plainText(msg message.Message) string {
+	var b strings.Builder
+	for _, seg := range msg {
+		if seg.Type == "text" {
+			b.WriteString(seg.Data["text"])
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // buildPrivatePayload 把原生 OneBot 私聊事件转换为统一协议 QQMessagePayload。

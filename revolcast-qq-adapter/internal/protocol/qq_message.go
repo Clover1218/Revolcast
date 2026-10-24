@@ -61,6 +61,13 @@ type QQSendPrivateMsgPayload struct {
 	MessageSegments []QQSegment `json:"message_segments"`
 }
 
+// QQSendGroupMsgPayload 是 Backend → Adapter 的群聊发送指令 payload。
+type QQSendGroupMsgPayload struct {
+	CommandID       string      `json:"command_id"`
+	GroupID         string      `json:"group_id"`
+	MessageSegments []QQSegment `json:"message_segments"`
+}
+
 // QQSendPrivateMessageResultPayload 是 Adapter → Backend 的执行结果，必须原样回传 command_id。
 type QQSendPrivateMessageResultPayload struct {
 	CommandID         string `json:"command_id"`

@@ -174,6 +174,11 @@ Type字段基本格式如下：
 #### 消息结构定义
 两者消息结构相同，只做业务逻辑上的区分，两者均使用统一的 Envelope：
 
+> **上报范围（当前约定）**：私聊消息由 Adapter **全量**上报，业务门禁交给 Backend 的 `revolcast` 前缀识别；
+> 群聊消息由 Adapter **仅在 @ 机器人（或以机器人昵称开头）时**上报，普通群聊一律不上报。
+> 群聊的这条限制是为避免把整个群的消息都灌给 Backend 而采用的策略，放开前应先评估消息量与群内可见性影响。
+
+
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `version` | `string` | 是 | 协议版本，当前为 `v1` |
@@ -489,6 +494,55 @@ func NewPrivateTextPayload(receiverID, text string) QQSendPrivateMsgPayload {
     }
 }
 ```
+
+### command.qq.send_group_msg
+
+向指定 QQ 群发送一条消息。当前用于「群内 @ 机器人触发业务指令」的回执：私聊指令回私聊，群内指令回原群。
+
+#### 消息结构定义
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `version` | `string` | 是 | 协议版本，当前为 `v1` |
+| `type` | `string` | 是 | 固定为 `command.qq.send_group_msg` |
+| `trace_id` | `string` | 是 | 与触发该指令的 `event.qq.message.group` 保持一致的链路追踪标识 |
+| `payload` | `object` | 是 | 指令数据 |
+
+`payload` 字段定义如下：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `command_id` | `string` | 是 | 由 Backend 生成的指令唯一标识 |
+| `group_id` | `string` | 是 | 目标群号（来自入站事件的 `conversation.id`，不是发送者 QQ 号） |
+| `message_segments` | `array` | 是 | 消息段数组，结构与 `command.qq.send_private_message` 完全一致 |
+
+#### 示例
+
+向群号 `200001` 回复「当前服务器有 2 人：Bot1，Bot2」：
+```json
+{
+  "version": "v1",
+  "type": "command.qq.send_group_msg",
+  "trace_id": "019a1234-5678-7abc-8def-0123456789ab",
+  "payload": {
+    "command_id": "019a1234-5678-7abc-8def-0123456789ab",
+    "group_id": "200001",
+    "message_segments": [
+      {
+        "type": "text",
+        "data": {
+          "text": "当前服务器有 2 人：Bot1，Bot2"
+        }
+      }
+    ]
+  }
+}
+```
+
+补充说明：
+- 与 `command.qq.send_private_message` 的唯一差异是投递目标：群聊按 `group_id` 投递，私聊按 `receiver_id` 投递。
+- 与私聊指令共用同一套文本段渲染逻辑，消息格式保持一致。
+- 群聊回执**当前不产生 `result.qq.send_group_msg`**：Backend 尚未消费任何 `result.qq.*` 消息，Adapter 侧仅记录发送日志。若后续需要发送回执追踪，应先定义对应的 `result.*` 消息类型再启用。
 
 ### result.qq.send_private_message
 

@@ -16,11 +16,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// commandPrefix 是私聊业务指令的统一前缀（忽略大小写）。
+// commandPrefix 是私聊/群聊业务指令的统一前缀（忽略大小写）。
 //
 // 为什么要前缀门禁：QQ Adapter **不过滤**私聊消息，会把所有私聊原样转发给 Backend
 // （业务决策只在 Backend，见 AGENTS.md §3.2）。因此这里必须先按前缀筛掉普通聊天，
-// 否则机器人会回复用户的每一句私聊。
+// 否则机器人会回复用户的每一句私聊。群聊虽然只在 @ 机器人时上报，但仍然不是
+// 「@ 了就一定是指令」（可能只是打招呼），所以同样走前缀门禁。
 const commandPrefix = "revolcast"
 
 // commandHelpText 是 `revolcast` 开头但无法识别时的统一帮助文案，便于用户自查。
@@ -171,8 +172,10 @@ func NewBizHandler(
 }
 
 // route 按消息类型做业务路由。
-// 当前支持 QQ 私聊的六类指令：user bind / server list / server <code> status /
-// server <code> bind / server <code> unbind / help。其它类型暂不打扰，待后续业务在此扩展 case。
+// 当前支持 QQ 私聊与群聊（群内 @ 机器人）的六类指令：user bind / server list /
+// server <code> status / server <code> bind / server <code> unbind / help。
+// 两种会话**共用**同一套指令识别与业务逻辑，只有回执落点不同：
+// 私聊回发送者 QQ，群聊回原群号。其它类型暂不打扰，待后续业务在此扩展 case。
 func route(
 	ctx context.Context,
 	task queue.Task,
@@ -182,8 +185,10 @@ func route(
 	notifier gameNotifier,
 	log *zap.Logger,
 ) (*outbound, error) {
-	if task.Type != protocol.TypeQQMessagePrivate {
-		// 当前仅处理 QQ 私聊；群聊/其它事件后续扩展。
+	// 群聊消息只会在 Adapter 侧「被 @ 机器人」时才上报（见 revolcast-qq-adapter/main.go），
+	// 因此这里无需再判断 is_to_me；普通群聊不会到达本函数。
+	isGroup := task.Type == protocol.TypeQQMessageGroup
+	if task.Type != protocol.TypeQQMessagePrivate && !isGroup {
 		return nil, nil
 	}
 
@@ -192,7 +197,12 @@ func route(
 		log.Warn("解析 QQ 消息 payload 失败", zap.Error(err))
 		return nil, nil
 	}
-	if payload.Conversation.Type != "private" {
+	// task.Type 与 payload.conversation.type 必须自洽：错配说明上游组装有误，直接丢弃。
+	wantConvType := "private"
+	if isGroup {
+		wantConvType = "group"
+	}
+	if payload.Conversation.Type != wantConvType {
 		return nil, nil
 	}
 
@@ -284,12 +294,21 @@ func route(
 		notifyGameRoleUnbound(notifier, outcome)
 	}
 
-	// 所有已识别指令都向用户回一条私聊消息，避免静默无响应。
+	// 所有已识别指令都向用户回一条消息，避免静默无响应。
 	// 文案不泄露内部错误细节（细节只进日志）。
+	// 落点由会话类型决定：私聊回发送者，群聊回原群（便于同群其他人看到问答结果）。
+	segments := []protocol.QQSegment{protocol.NewTextSegment(reply)}
+	if isGroup {
+		return &outbound{Type: protocol.TypeQQSendGroupMessage, Payload: protocol.QQSendGroupMsgPayload{
+			CommandID:       protocol.NewCommandID(),
+			GroupID:         payload.Conversation.ID,
+			MessageSegments: segments,
+		}}, nil
+	}
 	payloadOut := protocol.QQSendPrivateMsgPayload{
 		CommandID:       protocol.NewCommandID(),
 		ReceiverID:      payload.Sender.ID,
-		MessageSegments: []protocol.QQSegment{protocol.NewTextSegment(reply)},
+		MessageSegments: segments,
 	}
 	return &outbound{Type: protocol.TypeQQSendPrivateMessage, Payload: payloadOut}, nil
 }

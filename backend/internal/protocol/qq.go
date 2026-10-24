@@ -71,6 +71,14 @@ type QQSendPrivateMsgPayload struct {
 	MessageSegments []QQSegment `json:"message_segments"` // 消息段数组，保持顺序
 }
 
+// QQSendGroupMsgPayload 是 Backend → Adapter 的群聊发送指令 payload。
+// 与私聊版本只差接收方语义：私聊按 QQ 号投递，群聊按群号投递。
+type QQSendGroupMsgPayload struct {
+	CommandID       string      `json:"command_id"`       // Backend 生成，Adapter 原样回传
+	GroupID         string      `json:"group_id"`         // 目标群号
+	MessageSegments []QQSegment `json:"message_segments"` // 消息段数组，保持顺序
+}
+
 // QQSendPrivateMessageResultPayload 是 Adapter → Backend 的私聊发送执行结果。
 type QQSendPrivateMessageResultPayload struct {
 	CommandID         string `json:"command_id"`
@@ -86,6 +94,7 @@ const (
 	TypeQQMessageGroup             = "event.qq.message.group"
 	TypeQQSendPrivateMessage       = "command.qq.send_private_message"
 	TypeQQSendPrivateMessageResult = "result.qq.send_private_message"
+	TypeQQSendGroupMessage         = "command.qq.send_group_msg"
 
 	CommandStatusSuccess = "success"
 	CommandStatusFailed  = "failed"

@@ -159,9 +159,45 @@ func (c *WSClient) handleBusiness(env protocol.Envelope) {
 	switch env.Type {
 	case protocol.TypeCommandQQSendPrivateMsg:
 		c.handleSendPrivateMessage(env)
+	case protocol.TypeCommandQQSendGroupMsg:
+		// 群内 @ 机器人触发业务时，Backend 在原群回执（临时能力，见 main.go 注册的群聊 handler）。
+		c.handleSendGroupMessage(env)
 	default:
 		c.logger.Info("[收到未处理指令]", zap.String("type", env.Type))
 	}
+}
+
+// segmentsText 拼接消息段中的纯文本（MVP 仅支持文本，富媒体段后续扩展）。
+func segmentsText(segments []protocol.QQSegment) string {
+	var sb []rune
+	for _, seg := range segments {
+		if seg.Type != "text" {
+			continue
+		}
+		var t string
+		if raw, ok := seg.Data["text"]; ok {
+			_ = json.Unmarshal(raw, &t)
+		}
+		sb = append(sb, []rune(t)...)
+	}
+	return string(sb)
+}
+
+// botCtx 返回用于主动发送消息的 ZeroBot 上下文。
+// self_id 来自入站事件（SetSelfID），未收到过任何消息前无法发送。
+// 失败时返回面向内部日志的原因文案。
+func (c *WSClient) botCtx() (*zero.Ctx, string) {
+	selfID := c.botSelfID.Load()
+	if selfID == 0 {
+		c.logger.Error("[未获取到 bot self_id，无法发送消息]")
+		return nil, "unknown bot self_id"
+	}
+	botCtx := zero.GetBot(selfID)
+	if botCtx == nil {
+		c.logger.Error("[GetBot 返回空，bot 未连接]", zap.Int64("self_id", selfID))
+		return nil, "bot not connected"
+	}
+	return botCtx, ""
 }
 
 // handleSendPrivateMessage 处理 command.qq.send_private_message：
@@ -179,46 +215,18 @@ func (c *WSClient) handleSendPrivateMessage(env protocol.Envelope) {
 		return
 	}
 
-	// 仅取文本段拼接为纯文本发送（MVP 仅支持文本，富媒体段后续扩展）。
-	var sb []rune
-	for _, seg := range p.MessageSegments {
-		if seg.Type != "text" {
-			continue
-		}
-		var t string
-		if raw, ok := seg.Data["text"]; ok {
-			_ = json.Unmarshal(raw, &t)
-		}
-		sb = append(sb, []rune(t)...)
-	}
-
-	// 调用 OneBot 私聊发送 API。ZeroBot 的 API 挂在具体 bot 上，
-	// 通过 GetBot(selfID) 取得 Ctx 后调用（不依赖具体事件 ctx）。
-	selfID := c.botSelfID.Load()
-	if selfID == 0 {
-		c.logger.Error("[未获取到 bot self_id，无法发送私聊]")
-		res := protocol.QQSendPrivateMessageResultPayload{
-			CommandID:    p.CommandID,
-			Status:       protocol.CommandStatusFailed,
-			ErrorCode:    "QQ_SEND_API_ERROR",
-			ErrorMessage: "unknown bot self_id",
-		}
-		c.SendEnvelope(protocol.TypeResultQQSendPrivateMsg, env.TraceID, res)
-		return
-	}
-	botCtx := zero.GetBot(selfID)
+	botCtx, reason := c.botCtx()
 	if botCtx == nil {
-		c.logger.Error("[GetBot 返回空，bot 未连接]", zap.Int64("self_id", selfID))
 		res := protocol.QQSendPrivateMessageResultPayload{
 			CommandID:    p.CommandID,
 			Status:       protocol.CommandStatusFailed,
 			ErrorCode:    "QQ_SEND_API_ERROR",
-			ErrorMessage: "bot not connected",
+			ErrorMessage: reason,
 		}
 		c.SendEnvelope(protocol.TypeResultQQSendPrivateMsg, env.TraceID, res)
 		return
 	}
-	platformMsgID := botCtx.SendPrivateMessage(qq, message.Text(string(sb)))
+	platformMsgID := botCtx.SendPrivateMessage(qq, message.Text(segmentsText(p.MessageSegments)))
 
 	res := protocol.QQSendPrivateMessageResultPayload{
 		CommandID:         p.CommandID,
@@ -226,4 +234,35 @@ func (c *WSClient) handleSendPrivateMessage(env protocol.Envelope) {
 		PlatformMessageID: strconv.FormatInt(platformMsgID, 10),
 	}
 	c.SendEnvelope(protocol.TypeResultQQSendPrivateMsg, env.TraceID, res)
+}
+
+// handleSendGroupMessage 处理 command.qq.send_group_msg：在指定群里回一条文本消息。
+//
+// 根因与私聊不同：群聊回执目前不产生 result.*（Backend 侧尚未消费任何 result.qq.*），
+// 因此这里只记日志，不虚构一个无人处理的回执类型。随群聊回执正式化时再补。
+func (c *WSClient) handleSendGroupMessage(env protocol.Envelope) {
+	var p protocol.QQSendGroupMsgPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		c.logger.Error("[群聊指令解析失败]", zap.Error(err))
+		return
+	}
+
+	groupID, err := strconv.ParseInt(p.GroupID, 10, 64)
+	if err != nil {
+		c.logger.Error("[group_id 非法]", zap.String("group_id", p.GroupID), zap.Error(err))
+		return
+	}
+
+	botCtx, reason := c.botCtx()
+	if botCtx == nil {
+		c.logger.Error("[群聊消息发送失败]", zap.String("reason", reason),
+			zap.String("group_id", p.GroupID), zap.String("command_id", p.CommandID))
+		return
+	}
+	msgID := botCtx.SendGroupMessage(groupID, message.Text(segmentsText(p.MessageSegments)))
+	c.logger.Info("[群聊消息已发送]",
+		zap.String("group_id", p.GroupID),
+		zap.String("command_id", p.CommandID),
+		zap.Int64("platform_message_id", msgID),
+	)
 }
