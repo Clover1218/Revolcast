@@ -13,6 +13,8 @@ type Config struct {
 	App      AppConfig      `mapstructure:"app"`
 	Log      LogConfig      `mapstructure:"log"`
 	WS       WSConfig       `mapstructure:"ws"`
+	NapCat   NapCatConfig   `mapstructure:"napcat"`
+	Bot      BotConfig      `mapstructure:"bot"`
 	Database DatabaseConfig `mapstructure:"database"`
 	MongoDB  MongoDBConfig  `mapstructure:"mongodb"`
 	Redis    RedisConfig    `mapstructure:"redis"`
@@ -23,6 +25,33 @@ type WSConfig struct {
 	Addr  string `mapstructure:"addr"`   // Backend WS 地址，e.g. "localhost:8080"
 	Token string `mapstructure:"token"`  // 与 Backend ws.token 一致的鉴权串
 	BotID string `mapstructure:"bot_id"` // 本 Adapter 的稳定逻辑 ID，用于指令回传路由
+}
+
+// NapCatConfig 是 OneBot 实现端（NapCat）的 WebSocket 服务端地址。
+// Adapter 以「WS 客户端」身份主动连它，因此 NapCat 侧必须开启
+// 「WebSocket 服务器」并监听 0.0.0.0（监听 127.0.0.1 时容器连不进来）。
+//
+// 对应环境变量：
+//
+//	REVOLCAST_NAPCAT_WS_URL、REVOLCAST_NAPCAT_TOKEN
+type NapCatConfig struct {
+	WSURL string `mapstructure:"ws_url"` // e.g. ws://host.docker.internal:6701
+	Token string `mapstructure:"token"`  // NapCat 侧配置的 access_token；未配置则留空
+}
+
+// BotConfig 是 ZeroBot 的运行参数（登录哪个 QQ 由 NapCat 决定，这里只管机器人行为）。
+//
+// 两个 []string 字段刻意不用 []int64：viper 的环境变量覆盖只能给出字符串，
+// 而 mapstructure 在未开启 WeaklyTypedInput 时不会把 "123" 转成 int64。
+// 因此统一按字符串收，由 main 再解析校验（config.yaml 里也必须写带引号的字符串）。
+//
+// 对应环境变量：
+//
+//	REVOLCAST_BOT_NICKNAME、REVOLCAST_BOT_SUPERUSERS（逗号分隔）、REVOLCAST_BOT_COMMAND_PREFIX
+type BotConfig struct {
+	NickName      []string `mapstructure:"nickname"`       // 触发「@ 机器人」的昵称列表
+	SuperUsers    []string `mapstructure:"superusers"`     // 超级用户 QQ 号，逗号分隔
+	CommandPrefix string   `mapstructure:"command_prefix"` // 命令前缀，留空 = 无前缀
 }
 
 type AppConfig struct {
@@ -96,6 +125,14 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("ws.addr", "localhost:8080")
 	v.SetDefault("ws.token", "123")
 	v.SetDefault("ws.bot_id", "revolcast-qq-bot")
+	// NapCat（OneBot WS 服务端）：Adapter 是客户端，容器化后地址通常是
+	// ws://host.docker.internal:6701（NapCat 跑在宿主机）。
+	v.SetDefault("napcat.ws_url", "ws://127.0.0.1:6701")
+	v.SetDefault("napcat.token", "")
+	// ZeroBot 行为参数
+	v.SetDefault("bot.nickname", []string{"bot"})
+	v.SetDefault("bot.superusers", []string{})
+	v.SetDefault("bot.command_prefix", "")
 
 	// 2. 从 config.yaml 读取
 	v.SetConfigName("config")

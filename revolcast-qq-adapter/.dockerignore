@@ -1,0 +1,27 @@
+# 构建上下文剔除项
+.git
+.gitignore
+logs
+*.log
+.env
+.env.*
+
+# 宿主机编译产物
+*.exe
+*.dll
+*.so
+*.dylib
+build/
+bin/
+
+# 文档与 IDE
+*.md
+.vscode/
+.idea/
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# 测试缓存
+*.test
+coverage.out

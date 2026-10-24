@@ -46,3 +46,22 @@ ws:
   addr: "localhost:8080"
   token: "123"
   bot_id: "revolcast-qq-bot"
+
+# NapCat（OneBot 实现端）的 WebSocket 服务端。
+# 本 Adapter 是「客户端」，主动连 NapCat，所以这里填的是 NapCat 的监听地址。
+#   - NapCat 与 Adapter 同机（非容器）：ws://127.0.0.1:6701
+#   - Adapter 在容器、NapCat 在宿主机：ws://host.docker.internal:6701
+#     （同时 NapCat 侧必须监听 0.0.0.0，监听 127.0.0.1 容器连不进来）
+# token 与 NapCat 配置里的 access_token 保持一致，未设置则留空。
+napcat:
+  ws_url: "ws://127.0.0.1:6701"
+  token: ""
+
+# ZeroBot 运行参数（不涉及登录账号，登录哪个 QQ 由 NapCat 决定）
+# 注意：superusers / nickname 必须写成带引号的字符串列表，
+# 因为环境变量覆盖只能提供字符串，结构体也按字符串接收后再解析。
+bot:
+  nickname:
+    - "bot"
+  superusers: []          # 例：["1457095790", "10001"]
+  command_prefix: ""

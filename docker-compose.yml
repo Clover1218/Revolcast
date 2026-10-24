@@ -1,0 +1,291 @@
+# ============================================================
+# Revolcast · 一键部署编排（项目根目录执行）
+#
+#   cp .env.example .env   # 首次部署：复制并按需修改
+#   docker compose up -d --build
+#
+# 拓扑：nginx（宿主机，你自己维护）→ backend → postgres / mongodb / redis
+#                                  └→ qq-adapter（主动连 backend + 宿主机上的 NapCat）
+#       NapCat 不在本 compose 内，以宿主机进程方式独立部署。
+#
+# 对外暴露策略（默认值，全部可在 .env 调整）：
+#   backend     : ${BACKEND_BIND_IP:-127.0.0.1}:${BACKEND_PORT:-8080}  默认只给本机 nginx 用
+#   qq-adapter  : 无端口（主动出站）
+#   postgres    : ${POSTGRES_BIND_IP:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}  仅宿主机
+#   mongodb     : ${MONGO_BIND_IP:-127.0.0.1}:${MONGO_HOST_PORT:-27017}       仅宿主机
+#   redis       : ${REDIS_BIND_IP:-127.0.0.1}:${REDIS_HOST_PORT:-6379}        仅宿主机
+#
+# 容器之间、以及 backend -> 数据库，一律走 compose 内部网络，不经过宿主机端口，
+# 因此把 *_BIND_IP 收紧到 127.0.0.1 不影响业务；完全不想暴露就把对应 ports 注释掉。
+#
+# 数据落盘：全部绑定到项目内 ./data/ 目录，便于整体打包备份（见各服务 volumes）。
+# ============================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ------------------------------------------------------------
+  # PostgreSQL：账号 / QQ 绑定 / 游戏服务器 / 会话
+  # ------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    container_name: revolcast-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-revolcast}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-revolcast}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 一致性：初始化脚本按 UTF8 / UTC 存储，展示时区交给应用层
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "${POSTGRES_BIND_IP:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # 绑定到项目内目录：备份 = 直接打包 ./data/postgres
+      # 注意：该目录必须为空才会执行下面的建表脚本
+      - ./data/postgres:/var/lib/postgresql/data
+      # 首次启动（数据目录为空）时按文件名顺序执行建表脚本
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 强制走 TCP：initdb 阶段的临时实例只开 unix socket
+      # （listen_addresses=''），不带 -h 时 pg_isready 会在建表还没跑完就报健康，
+      # backend 会提前连上来。走 TCP 只有正式实例起来才通。
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-revolcast} -d ${POSTGRES_DB:-revolcast}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - revolcast
+
+  # ------------------------------------------------------------
+  # MongoDB：game_events（原始事件审计） / server_messages（聊天转发）
+  # ------------------------------------------------------------
+  mongodb:
+    image: mongo:${MONGO_VERSION:-7}
+    container_name: revolcast-mongodb
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      # root 只用于运维（备份 / 手工修复），业务账号在初始化脚本里创建
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请在 .env 中设置 MONGO_ROOT_PASSWORD}
+      # 下面 4 个变量被 /docker-entrypoint-initdb.d/001_init.js 读取
+      MONGO_APP_DB: ${MONGO_DB:-revolcast}
+      MONGO_APP_USER: ${MONGO_USER:-revolcast}
+      MONGO_APP_PASSWORD: ${MONGO_PASSWORD:?请在 .env 中设置 MONGO_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${MONGO_BIND_IP:-127.0.0.1}:${MONGO_HOST_PORT:-27017}:27017"
+    volumes:
+      - ./data/mongo:/data/db
+      - ./docker/mongo/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 用「业务账号」认证探活，而不是匿名 ping：
+      # 初始化阶段（建 root、跑 001_init.js）mongod 会先起一个临时实例，
+      # 匿名 ping 那时就能通过 → backend 会在业务账号还没建好时连进来报认证失败。
+      # 业务账号是 001_init.js 建的，所以认证通过 = 初始化真的完成了。
+      test:
+        - CMD-SHELL
+        - 'mongosh --quiet --host 127.0.0.1 --port 27017 -u "$$MONGO_APP_USER" -p "$$MONGO_APP_PASSWORD" --authenticationDatabase "$$MONGO_APP_DB" --eval "db.runCommand({ping:1}).ok" | grep -q 1'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - revolcast
+
+  # ------------------------------------------------------------
+  # Redis：会话/限流/缓存/服务器在线状态快照
+  # 注意：状态快照 TTL 短（3 × 采集周期），属于可重建数据。
+  # ------------------------------------------------------------
+  redis:
+    image: redis:${REDIS_VERSION:-7-alpine}
+    container_name: revolcast-redis
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    # REDIS_PASSWORD 为空时不加 --requirepass（redis 对空口令的处理与「无密码」不等价）
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server --appendonly yes
+        fi
+    ports:
+      - "${REDIS_BIND_IP:-127.0.0.1}:${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'if [ -n "$$REDIS_PASSWORD" ]; then redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - revolcast
+
+  # ------------------------------------------------------------
+  # Backend：HTTP API + 三类 WS 接入（adapter / 游戏服务器 / Web）
+  # ------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        GO_VERSION: ${GO_VERSION:-1.26.5}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+    image: revolcast/backend:${IMAGE_TAG:-local}
+    container_name: revolcast-backend
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+
+      # ---- 应用 ----
+      REVOLCAST_APP_NAME: Revolcast
+      # production：Cookie 带 Secure（必须 HTTPS）+ 浏览器 WS 强制 Origin 白名单
+      # 尚未配 HTTPS 时先用 development，否则网页登录态下发后浏览器不会回传
+      REVOLCAST_APP_ENV: ${APP_ENV:-development}
+
+      # ---- 日志 ----
+      REVOLCAST_LOG_LEVEL: ${LOG_LEVEL:-info}
+      REVOLCAST_LOG_FORMAT: ${LOG_FORMAT:-json}
+      REVOLCAST_LOG_OUTPUT: ${LOG_OUTPUT:-both}
+      REVOLCAST_LOG_FILEPATH: logs/revolcast.log
+
+      # ---- PostgreSQL（走内部网络，地址固定为服务名）----
+      REVOLCAST_DATABASE_PGHOST: postgres
+      REVOLCAST_DATABASE_PGPORT: "5432"
+      REVOLCAST_DATABASE_PGUSER: ${POSTGRES_USER:-revolcast}
+      REVOLCAST_DATABASE_PGPASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      REVOLCAST_DATABASE_DBNAME: ${POSTGRES_DB:-revolcast}
+      REVOLCAST_DATABASE_SSLMODE: disable
+
+      # ---- MongoDB ----
+      REVOLCAST_MONGODB_MONGOHOST: mongodb
+      REVOLCAST_MONGODB_MONGOPORT: "27017"
+      REVOLCAST_MONGODB_MONGOUSER: ${MONGO_USER:-revolcast}
+      REVOLCAST_MONGODB_MONGOPASSWORD: ${MONGO_PASSWORD:?请在 .env 中设置 MONGO_PASSWORD}
+      REVOLCAST_MONGODB_DBNAME: ${MONGO_DB:-revolcast}
+
+      # ---- Redis ----
+      REVOLCAST_REDIS_REDISHOST: redis
+      REVOLCAST_REDIS_REDISPORT: "6379"
+      REVOLCAST_REDIS_REDISPASSWORD: ${REDIS_PASSWORD:-}
+      REVOLCAST_REDIS_DB: "0"
+
+      # ---- WS / 监听地址 ----
+      # 必须显式覆盖：镜像内 config.yaml 的默认值是 localhost:8080，
+      # 那会让服务只监听容器回环，其他容器（adapter / 游戏服务器）连不进来。
+      REVOLCAST_WS_ADDR: ":8080"
+      REVOLCAST_WS_TOKEN: ${WS_TOKEN:?请在 .env 中设置 WS_TOKEN（adapter 必须一致）}
+      # 浏览器 WS 的 Origin 白名单，逗号分隔；生产环境留空 = 拒绝所有浏览器 WS
+      REVOLCAST_WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-}
+      REVOLCAST_WS_STATUS_POLL_INTERVAL_SECONDS: ${STATUS_POLL_INTERVAL_SECONDS:-60}
+      REVOLCAST_WS_STATUS_POLL_TIMEOUT_SECONDS: ${STATUS_POLL_TIMEOUT_SECONDS:-5}
+
+      # ---- 业务队列（默认值已适配 2C4G，通常无需改）----
+      REVOLCAST_QUEUE_WORKERS: ${QUEUE_WORKERS:-16}
+      REVOLCAST_QUEUE_QUEUE_SIZE: ${QUEUE_SIZE:-4096}
+      REVOLCAST_QUEUE_ENQUEUE_TIMEOUT_MS: ${QUEUE_ENQUEUE_TIMEOUT_MS:-200}
+      REVOLCAST_QUEUE_TASK_TIMEOUT_MS: ${QUEUE_TASK_TIMEOUT_MS:-5000}
+    ports:
+      - "${BACKEND_BIND_IP:-127.0.0.1}:${BACKEND_PORT:-8080}:8080"
+    # 默认以 root 运行：本 compose 的持久化全部是绑定宿主机目录，
+    # 镜像内默认用户（uid 100）写不进 root 属主的 ./data，会直接启动失败。
+    # 想跑非 root：先把 ./data/logs/backend 改成 100:100，再把 PUID/PGID 设为 100。
+    user: "${PUID:-0}:${PGID:-0}"
+    volumes:
+      - ./data/logs/backend:/app/logs
+    healthcheck:
+      # 目前没有 /healthz 路由，用 TCP 探活；后续加了健康检查接口再改成 HTTP 探测
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8080"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s # 优雅关闭：停监听 -> 断 WS -> 排空队列（最长 15s）
+    networks:
+      - revolcast
+
+  # ------------------------------------------------------------
+  # QQ Adapter：连 Backend WS（上报事件 / 收指令）+ 连 NapCat（收发 QQ 消息）
+  #
+  # NapCat 不在本 compose 内，是宿主机上的独立进程。Adapter 以 WS 客户端身份
+  # 主动连它，所以 NAPCAT_WS_URL 默认走 host.docker.internal。
+  # ⚠️ NapCat 侧必须把「WebSocket 服务器」监听地址设为 0.0.0.0（或 docker 网桥 IP），
+  #    只监听 127.0.0.1 时容器无论如何都连不进来。
+  # ------------------------------------------------------------
+  qq-adapter:
+    build:
+      context: ./revolcast-qq-adapter
+      dockerfile: Dockerfile
+      args:
+        GO_VERSION: ${GO_VERSION:-1.26.5}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+    image: revolcast/qq-adapter:${IMAGE_TAG:-local}
+    container_name: revolcast-qq-adapter
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+
+      REVOLCAST_APP_NAME: Revolcast-QQ-Adapter
+      REVOLCAST_APP_ENV: ${APP_ENV:-development}
+      REVOLCAST_LOG_LEVEL: ${LOG_LEVEL:-info}
+      REVOLCAST_LOG_FORMAT: ${LOG_FORMAT:-console}
+      REVOLCAST_LOG_OUTPUT: ${LOG_OUTPUT:-both}
+      REVOLCAST_LOG_FILEPATH: logs/revolcast-qq-adapter.log
+
+      # 指向 Backend 的容器内地址（不是宿主机 localhost）
+      REVOLCAST_WS_ADDR: backend:8080
+      REVOLCAST_WS_TOKEN: ${WS_TOKEN:?请在 .env 中设置 WS_TOKEN（必须与 backend 一致）}
+      REVOLCAST_WS_BOT_ID: ${QQ_BOT_ID:-revolcast-qq-bot}
+
+      # ---- NapCat（OneBot WS 服务端，跑在宿主机）----
+      REVOLCAST_NAPCAT_WS_URL: ${NAPCAT_WS_URL:-ws://host.docker.internal:6701}
+      REVOLCAST_NAPCAT_TOKEN: ${NAPCAT_TOKEN:-}
+
+      # ---- 机器人行为 ----
+      REVOLCAST_BOT_NICKNAME: ${BOT_NICKNAME:-bot}
+      REVOLCAST_BOT_SUPERUSERS: ${BOT_SUPERUSERS:-}
+      REVOLCAST_BOT_COMMAND_PREFIX: ${BOT_COMMAND_PREFIX:-}
+    # 与 backend 同理：日志目录是绑定挂载，默认 root 运行避免权限问题
+    user: "${PUID:-0}:${PGID:-0}"
+    volumes:
+      - ./data/logs/adapter:/app/logs
+    extra_hosts:
+      # 让容器内的 host.docker.internal 指向宿主机（Linux 上默认没有这条解析）
+      - "host.docker.internal:host-gateway"
+    # 进阶（Linux 专有）：若不想让 NapCat 监听 0.0.0.0，
+    # 可改用 network_mode: host + NAPCAT_WS_URL=ws://127.0.0.1:6701，
+    # 同时删掉上面的 extra_hosts / networks 与本服务的 ports（host 模式不能共存）。
+    networks:
+      - revolcast
+
+networks:
+  revolcast:
+    driver: bridge

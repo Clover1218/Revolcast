@@ -1,4 +1,28 @@
+# 构建上下文剔除项：减小上下文体积、避免把宿主机产物/日志带进镜像层
 .git
+.gitignore
 logs
 *.log
 .env
+.env.*
+
+# 宿主机编译产物（Linux/Windows 二进制不能复用）
+*.exe
+*.dll
+*.so
+*.dylib
+build/
+bin/
+
+# 文档与本地工具产物
+docs/
+*.md
+.vscode/
+.idea/
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# 测试缓存
+*.test
+coverage.out

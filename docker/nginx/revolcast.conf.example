@@ -1,0 +1,80 @@
+# ============================================================
+# Revolcast · nginx 反代参考配置（示例，不参与 compose 构建）
+#
+# 放在宿主机 /etc/nginx/conf.d/revolcast.conf（或 sites-available + 软链）。
+# 前后端同一个域名：/api/ 走 backend，其余当静态站点（前端 dist）。
+#
+# 三个必须注意的点（漏一个就会出问题）：
+#   1. WebSocket 必须转发 Upgrade/Connection，并且 proxy_read_timeout 要放大，
+#      否则连接每 60s 被 nginx 掐断（表现：消息流反复断开重连）。
+#   2. Host 头要透传真实域名：backend 的浏览器 WS 会校验 Origin 白名单，
+#      改掉 Host 不影响 Origin 透传，但 X-Forwarded-Proto 决定后端判断是否 HTTPS。
+#   3. 前端与 API 同域时，会话 Cookie（SameSite=Lax）才能正常随请求发送；
+#      若前后端不同域，需要额外处理后端 Cookie 的 Domain/SameSite。
+# ============================================================
+
+# 放在 http {} 块内（Debian/Ubuntu 可写在 conf.d 顶部的 map 里）
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+upstream revolcast_backend {
+    server 127.0.0.1:8080;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name revolcast.example.com;
+    # 证书签好后可保留（Let's Encrypt 续期需要 80 端口可达）
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name revolcast.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/revolcast.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/revolcast.example.com/privkey.pem;
+
+    client_max_body_size 20m;
+
+    # ---- 前端静态站点 ----
+    root  /var/www/revolcast;
+    index index.html;
+    # history 路由（Vue Router / React Router）回退到 index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ---- 后端 API + 三类 WebSocket ----
+    # /api/v1/adapter/ws                      QQ Adapter
+    # /api/v1/game-servers/ws                 游戏服务器（鹊桥）
+    # /api/v1/game-servers/{code}/ws          浏览器订阅
+    location /api/ {
+        proxy_pass http://revolcast_backend;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Origin 原样透传（后端据此做白名单校验），不要覆盖
+
+        # WebSocket 升级（普通 HTTP 请求带上这两个头也无副作用）
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # WS 长连接：读超时要大于后端 30s Ping 间隔，否则会被周期性断开
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+
+        # 流式/长连接不要缓冲
+        proxy_buffering off;
+    }
+}

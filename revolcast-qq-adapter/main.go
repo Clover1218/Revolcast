@@ -78,14 +78,63 @@ func main() {
 		client.SendEnvelope(protocol.TypeEventQQMessageGroup, protocol.NewCommandID(), payload)
 	})
 
+	// ---- NapCat（OneBot WS 服务端）连接参数：全部来自配置，不再写死在代码里 ----
+	// 容器化后 NapCat 通常跑在宿主机，地址形如 ws://host.docker.internal:6701；
+	// 直连时可填 ws://127.0.0.1:6701。对应环境变量 REVOLCAST_NAPCAT_WS_URL。
+	napcatURL := strings.TrimSpace(cfg.NapCat.WSURL)
+	if napcatURL == "" {
+		panic("配置缺失: napcat.ws_url 为空（请设置 REVOLCAST_NAPCAT_WS_URL）")
+	}
+
+	nickNames := make([]string, 0, len(cfg.Bot.NickName))
+	for _, n := range cfg.Bot.NickName {
+		if s := strings.TrimSpace(n); s != "" {
+			nickNames = append(nickNames, s)
+		}
+	}
+	if len(nickNames) == 0 {
+		nickNames = []string{"bot"}
+	}
+
+	superUsers, invalidSuperUsers := parseSuperUsers(cfg.Bot.SuperUsers)
+	if len(invalidSuperUsers) > 0 {
+		// 只告警不阻断：写错一个 QQ 号不应让整个机器人起不来
+		log.Warn("忽略非法的超级用户 QQ 号", zap.Strings("invalid", invalidSuperUsers))
+	}
+
+	log.Info("NapCat 连接配置",
+		zap.String("ws_url", napcatURL),
+		zap.Bool("token_set", cfg.NapCat.Token != ""),
+		zap.Strings("nickname", nickNames),
+		zap.Int("super_users", len(superUsers)),
+	)
+
 	zero.RunAndBlock(&zero.Config{
-		NickName:      []string{"bot"},
-		CommandPrefix: "",
-		SuperUsers:    []int64{1457095790},
+		NickName:      nickNames,
+		CommandPrefix: cfg.Bot.CommandPrefix,
+		SuperUsers:    superUsers,
 		Driver: []zero.Driver{
-			driver.NewWebSocketClient("ws://127.0.0.1:6701", "J5xTRRESL-Fsdq1b"),
+			driver.NewWebSocketClient(napcatURL, cfg.NapCat.Token),
 		},
 	}, nil)
+}
+
+// parseSuperUsers 把配置里的 QQ 号字符串转成 ZeroBot 需要的 int64 列表。
+// 非数字 / 非正数视为非法项，交由调用方告警后忽略。
+func parseSuperUsers(list []string) (ids []int64, invalid []string) {
+	for _, raw := range list {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || id <= 0 {
+			invalid = append(invalid, s)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, invalid
 }
 
 // buildGroupAtPayload 把「群内 @ 机器人」的消息转换为统一协议 payload。
